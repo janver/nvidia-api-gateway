@@ -33,6 +33,9 @@ func LoadActiveKeys(ctx context.Context, sched *scheduler.Scheduler) error {
 		return fmt.Errorf("rebuild upstream runtime: %w", err)
 	}
 
+	// 清除所有 transport 缓存，确保代理配置变更后新连接使用最新设置
+	invalidateAllTransportCache()
+
 	if err := sched.Reset(ctx); err != nil {
 		return fmt.Errorf("reset scheduler state: %w", err)
 	}

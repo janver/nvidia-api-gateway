@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"testing"
+
+	"nvidia-api-gateway/pkg/models"
 )
 
 func TestBuildUpstreamProxyTransportInherit(t *testing.T) {
@@ -120,5 +122,31 @@ func TestResolveSOCKS5HTargetKeepsRemoteDNS(t *testing.T) {
 	}
 	if lookups != 0 {
 		t.Fatalf("expected no local DNS lookup for socks5h, got %d", lookups)
+	}
+}
+
+func TestBuildConfiguredUpstreamTransportDisablesHTTP2AndKeepAlivesForProxy(t *testing.T) {
+	cfg := models.DefaultSystemConfig()
+	transport, err := buildConfiguredUpstreamTransport(cfg, "socks5h://127.0.0.1:1080")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if transport == nil {
+		t.Fatal("expected transport")
+	}
+	if transport.ForceAttemptHTTP2 {
+		t.Fatal("expected HTTP/2 to be disabled for proxy transport")
+	}
+	if !transport.DisableKeepAlives {
+		t.Fatal("expected keep-alives to be disabled for proxy transport")
+	}
+	if transport.TLSNextProto == nil {
+		t.Fatal("expected TLSNextProto to be set when disabling HTTP/2")
+	}
+	if transport.TLSClientConfig == nil {
+		t.Fatal("expected TLSClientConfig to be initialized")
+	}
+	if len(transport.TLSClientConfig.NextProtos) != 1 || transport.TLSClientConfig.NextProtos[0] != "http/1.1" {
+		t.Fatalf("unexpected NextProtos: %#v", transport.TLSClientConfig.NextProtos)
 	}
 }

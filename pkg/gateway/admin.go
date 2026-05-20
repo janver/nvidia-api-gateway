@@ -53,34 +53,44 @@ type updateAPIKeyStatusRequest struct {
 }
 
 type systemConfigResponse struct {
-	UpstreamBaseURL       string `json:"upstreamBaseURL"`
-	SchedulerStrategy     string `json:"schedulerStrategy"`
-	MaxRetries            int    `json:"maxRetries"`
-	MaxConcurrency        int    `json:"maxConcurrency"`
-	RequestTimeoutSecond  int    `json:"requestTimeoutSecond"`
-	UpstreamProxyURL      string `json:"upstreamProxyURL"`
-	GatewayBaseURL        string `json:"gatewayBaseURL"`
-	FirstByteTimeoutMs    int    `json:"firstByteTimeoutMs"`
-	HealthProbeTimeoutSec int    `json:"healthProbeTimeoutSecond"`
-	EnableOpenAI          bool   `json:"enableOpenAI"`
-	EnableClaude          bool   `json:"enableClaude"`
-	EnableGemini          bool   `json:"enableGemini"`
-	AnonymousAccess       bool   `json:"anonymousAccess"`
+	UpstreamBaseURL         string `json:"upstreamBaseURL"`
+	SchedulerStrategy       string `json:"schedulerStrategy"`
+	MaxRetries              int    `json:"maxRetries"`
+	MaxConcurrency          int    `json:"maxConcurrency"`
+	RequestTimeoutSecond    int    `json:"requestTimeoutSecond"`
+	UpstreamProxyURL        string `json:"upstreamProxyURL"`
+	UpstreamProxyID         uint   `json:"upstreamProxyId,omitempty"`
+	GatewayBaseURL          string `json:"gatewayBaseURL"`
+	FirstByteTimeoutMs      int    `json:"firstByteTimeoutMs"`
+	HealthProbeTimeoutSec   int    `json:"healthProbeTimeoutSecond"`
+	StreamIdleTimeoutSec    int    `json:"streamIdleTimeoutSecond"`
+	StreamKeepAliveSec      int    `json:"streamKeepAliveSecond"`
+	TransportRetryCount     int    `json:"transportRetryCount"`
+	TransportRetryBackoffMs int    `json:"transportRetryBackoffMs"`
+	EnableOpenAI            bool   `json:"enableOpenAI"`
+	EnableClaude            bool   `json:"enableClaude"`
+	EnableGemini            bool   `json:"enableGemini"`
+	AnonymousAccess         bool   `json:"anonymousAccess"`
 }
 
 type updateSystemConfigRequest struct {
-	UpstreamBaseURL       *string `json:"upstreamBaseURL"`
-	SchedulerStrategy     *string `json:"schedulerStrategy"`
-	MaxRetries            *int    `json:"maxRetries"`
-	MaxConcurrency        *int    `json:"maxConcurrency"`
-	RequestTimeoutSecond  *int    `json:"requestTimeoutSecond"`
-	UpstreamProxyURL      *string `json:"upstreamProxyURL"`
-	FirstByteTimeoutMs    *int    `json:"firstByteTimeoutMs"`
-	HealthProbeTimeoutSec *int    `json:"healthProbeTimeoutSecond"`
-	EnableOpenAI          *bool   `json:"enableOpenAI"`
-	EnableClaude          *bool   `json:"enableClaude"`
-	EnableGemini          *bool   `json:"enableGemini"`
-	AnonymousAccess       *bool   `json:"anonymousAccess"`
+	UpstreamBaseURL         *string `json:"upstreamBaseURL"`
+	SchedulerStrategy       *string `json:"schedulerStrategy"`
+	MaxRetries              *int    `json:"maxRetries"`
+	MaxConcurrency          *int    `json:"maxConcurrency"`
+	RequestTimeoutSecond    *int    `json:"requestTimeoutSecond"`
+	UpstreamProxyURL        *string `json:"upstreamProxyURL"`
+	UpstreamProxyID         *uint   `json:"upstreamProxyId,omitempty"`
+	FirstByteTimeoutMs      *int    `json:"firstByteTimeoutMs"`
+	HealthProbeTimeoutSec   *int    `json:"healthProbeTimeoutSecond"`
+	StreamIdleTimeoutSec    *int    `json:"streamIdleTimeoutSecond"`
+	StreamKeepAliveSec      *int    `json:"streamKeepAliveSecond"`
+	TransportRetryCount     *int    `json:"transportRetryCount"`
+	TransportRetryBackoffMs *int    `json:"transportRetryBackoffMs"`
+	EnableOpenAI            *bool   `json:"enableOpenAI"`
+	EnableClaude            *bool   `json:"enableClaude"`
+	EnableGemini            *bool   `json:"enableGemini"`
+	AnonymousAccess         *bool   `json:"anonymousAccess"`
 }
 
 func AddAPIKey(sched *scheduler.Scheduler) fiber.Handler {
@@ -406,21 +416,21 @@ func GetSystemConfig(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "\u8bfb\u53d6\u7cfb\u7edf\u914d\u7f6e\u5931\u8d25"})
 	}
-	return c.JSON(newSystemConfigResponse(store.SystemConfig))
+	return c.JSON(newSystemConfigResponse(resolveStoredSystemConfig(store)))
 }
 
 func UpdateSystemConfig(sched *scheduler.Scheduler) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		var req updateSystemConfigRequest
 		if err := c.BodyParser(&req); err != nil {
-			return c.Status(400).JSON(fiber.Map{"error": "\u8bf7\u6c42\u4f53\u683c\u5f0f\u65e0\u6548"})
+			return c.Status(400).JSON(fiber.Map{"error": "invalid request body"})
 		}
 
 		var normalizedProxyURL *string
 		if req.UpstreamProxyURL != nil {
 			trimmed := strings.TrimSpace(*req.UpstreamProxyURL)
 			if err := validateUpstreamProxySetting(trimmed); err != nil {
-				return c.Status(400).JSON(fiber.Map{"error": "\u4e0a\u6e38\u4ee3\u7406\u914d\u7f6e\u65e0\u6548: " + err.Error()})
+				return c.Status(400).JSON(fiber.Map{"error": "invalid upstream proxy setting: " + err.Error()})
 			}
 			normalizedProxyURL = &trimmed
 		}
@@ -428,6 +438,15 @@ func UpdateSystemConfig(sched *scheduler.Scheduler) fiber.Handler {
 		var updatedConfig models.SystemConfig
 		err := db.UpdateStore(func(store *db.Store) error {
 			cfg := store.SystemConfig
+			if req.UpstreamProxyID != nil {
+				if err := validateAPIKeyProxyReference(store, *req.UpstreamProxyID); err != nil {
+					return err
+				}
+				cfg.UpstreamProxyID = *req.UpstreamProxyID
+				if *req.UpstreamProxyID > 0 {
+					cfg.UpstreamProxyURL = ""
+				}
+			}
 			if req.UpstreamBaseURL != nil {
 				cfg.UpstreamBaseURL = strings.TrimSpace(*req.UpstreamBaseURL)
 			}
@@ -444,13 +463,28 @@ func UpdateSystemConfig(sched *scheduler.Scheduler) fiber.Handler {
 				cfg.RequestTimeoutSecond = *req.RequestTimeoutSecond
 			}
 			if normalizedProxyURL != nil {
-				cfg.UpstreamProxyURL = *normalizedProxyURL
+				if req.UpstreamProxyID == nil || *req.UpstreamProxyID == 0 {
+					cfg.UpstreamProxyURL = *normalizedProxyURL
+					cfg.UpstreamProxyID = 0
+				}
 			}
 			if req.FirstByteTimeoutMs != nil {
 				cfg.FirstByteTimeoutMs = *req.FirstByteTimeoutMs
 			}
 			if req.HealthProbeTimeoutSec != nil {
 				cfg.HealthProbeTimeoutSec = *req.HealthProbeTimeoutSec
+			}
+			if req.StreamIdleTimeoutSec != nil {
+				cfg.StreamIdleTimeoutSec = *req.StreamIdleTimeoutSec
+			}
+			if req.StreamKeepAliveSec != nil {
+				cfg.StreamKeepAliveSec = *req.StreamKeepAliveSec
+			}
+			if req.TransportRetryCount != nil {
+				cfg.TransportRetryCount = *req.TransportRetryCount
+			}
+			if req.TransportRetryBackoffMs != nil {
+				cfg.TransportRetryBackoffMs = *req.TransportRetryBackoffMs
 			}
 			if req.EnableOpenAI != nil {
 				cfg.EnableOpenAI = *req.EnableOpenAI
@@ -466,19 +500,23 @@ func UpdateSystemConfig(sched *scheduler.Scheduler) fiber.Handler {
 			}
 			cfg = models.NormalizeSystemConfig(cfg)
 			store.SystemConfig = cfg
-			updatedConfig = cfg
+			updatedConfig = resolveStoredSystemConfig(store)
 			return nil
 		})
 		if err != nil {
-			return c.Status(500).JSON(fiber.Map{"error": "\u66f4\u65b0\u7cfb\u7edf\u914d\u7f6e\u5931\u8d25"})
+			status := 500
+			if err.Error() == "???????" {
+				status = 400
+			}
+			return c.Status(status).JSON(fiber.Map{"error": err.Error()})
 		}
 
 		if err := LoadActiveKeys(context.Background(), sched); err != nil {
-			return c.Status(500).JSON(fiber.Map{"error": "\u7cfb\u7edf\u914d\u7f6e\u5df2\u4fdd\u5b58\uff0c\u4f46\u91cd\u8f7d\u8c03\u5ea6\u5668\u5931\u8d25"})
+			return c.Status(500).JSON(fiber.Map{"error": "system config saved, but scheduler reload failed"})
 		}
 
 		return c.JSON(fiber.Map{
-			"message": "\u7cfb\u7edf\u914d\u7f6e\u66f4\u65b0\u6210\u529f",
+			"message": "system config updated successfully",
 			"config":  newSystemConfigResponse(updatedConfig),
 		})
 	}
@@ -487,19 +525,24 @@ func UpdateSystemConfig(sched *scheduler.Scheduler) fiber.Handler {
 func newSystemConfigResponse(cfg models.SystemConfig) systemConfigResponse {
 	cfg = models.NormalizeSystemConfig(cfg)
 	return systemConfigResponse{
-		UpstreamBaseURL:       cfg.UpstreamBaseURL,
-		SchedulerStrategy:     cfg.SchedulerStrategy,
-		MaxRetries:            cfg.MaxRetries,
-		MaxConcurrency:        cfg.MaxConcurrency,
-		RequestTimeoutSecond:  cfg.RequestTimeoutSecond,
-		UpstreamProxyURL:      cfg.UpstreamProxyURL,
-		GatewayBaseURL:        gatewayBaseURL(),
-		FirstByteTimeoutMs:    cfg.FirstByteTimeoutMs,
-		HealthProbeTimeoutSec: cfg.HealthProbeTimeoutSec,
-		EnableOpenAI:          cfg.EnableOpenAI,
-		EnableClaude:          cfg.EnableClaude,
-		EnableGemini:          cfg.EnableGemini,
-		AnonymousAccess:       cfg.AnonymousAccess,
+		UpstreamBaseURL:         cfg.UpstreamBaseURL,
+		SchedulerStrategy:       cfg.SchedulerStrategy,
+		MaxRetries:              cfg.MaxRetries,
+		MaxConcurrency:          cfg.MaxConcurrency,
+		RequestTimeoutSecond:    cfg.RequestTimeoutSecond,
+		UpstreamProxyURL:        cfg.UpstreamProxyURL,
+		UpstreamProxyID:         cfg.UpstreamProxyID,
+		GatewayBaseURL:          gatewayBaseURL(),
+		FirstByteTimeoutMs:      cfg.FirstByteTimeoutMs,
+		HealthProbeTimeoutSec:   cfg.HealthProbeTimeoutSec,
+		StreamIdleTimeoutSec:    cfg.StreamIdleTimeoutSec,
+		StreamKeepAliveSec:      cfg.StreamKeepAliveSec,
+		TransportRetryCount:     cfg.TransportRetryCount,
+		TransportRetryBackoffMs: cfg.TransportRetryBackoffMs,
+		EnableOpenAI:            cfg.EnableOpenAI,
+		EnableClaude:            cfg.EnableClaude,
+		EnableGemini:            cfg.EnableGemini,
+		AnonymousAccess:         cfg.AnonymousAccess,
 	}
 }
 

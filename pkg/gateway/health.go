@@ -128,6 +128,10 @@ type upstreamModelsResponse struct {
 	GeneratedAt  time.Time                `json:"generatedAt"`
 	ProbeKeyName string                   `json:"probeKeyName"`
 	Models       []healthModelCatalogItem `json:"models"`
+	// Cached=true 表示这次返回的是内存里的旧目录，
+	// 因为本次拉取上游 /models 失败；Warning 给出失败原因。
+	Cached  bool   `json:"cached,omitempty"`
+	Warning string `json:"warning,omitempty"`
 }
 
 type healthRunRequest struct {
@@ -189,7 +193,13 @@ func RunHealthReport(sched *scheduler.Scheduler) fiber.Handler {
 		if err != nil {
 			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
 		}
-		report, err := buildSystemHealthReport(context.Background(), sched, normalized)
+		// 给整次健康检查加一个硬上限，避免上游每条请求都打满 HealthProbeTimeoutSec
+		// 之后整体跑十几分钟、上游已经断了后端还在死磕。
+		// scope=single 只测一个模型，3 分钟足够覆盖 chat/embeddings + 单点重试；
+		// scope=all 全量扫描默认目录在 100+ 个，配 4 路并发 ~ 10 分钟内基本能跑完。
+		ctx, cancel := context.WithTimeout(context.Background(), overallHealthRunTimeout(normalized))
+		defer cancel()
+		report, err := buildSystemHealthReport(ctx, sched, normalized)
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 		}
@@ -198,11 +208,36 @@ func RunHealthReport(sched *scheduler.Scheduler) fiber.Handler {
 	}
 }
 
+// overallHealthRunTimeout 给一次 RunHealthReport 调用的总时长封顶。
+// 这个上限和前端 AbortController 的超时配套（前端 single=3min / all=10min），
+// 任何一边先到都会让任务停下来，不会再有"前端按钮已经显示失败、后端还在扫"的鬼影任务。
+func overallHealthRunTimeout(req healthRunRequest) time.Duration {
+	if req.Scope == "single" {
+		return 3 * time.Minute
+	}
+	return 10 * time.Minute
+}
+
 func GetUpstreamModels() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		systemHealthStore.ensureHydrated()
 		catalog, probeKeyName, err := loadUpstreamModelCatalog(context.Background())
 		if err != nil {
+			// 上游 /models 暂时不可达时（代理抖动 / NVIDIA CDN 抽风等），
+			// 不应该让前端的模型下拉直接空掉——之前用户反馈的 "无法获取模型"
+			// 就是这条路径返回 500、前端展示不出任何选项。
+			// 这里降级回内存里已经持久化过的最新一份目录，并把错误信息透传，
+			// 让前端可以提示 "用的是缓存目录" 但仍然能正常选模型做单点检查。
+			cached := systemHealthStore.modelCatalogSnapshot()
+			if len(cached) > 0 {
+				return c.JSON(upstreamModelsResponse{
+					GeneratedAt:  time.Now(),
+					ProbeKeyName: probeKeyName,
+					Models:       cached,
+					Warning:      err.Error(),
+					Cached:       true,
+				})
+			}
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 		}
 		systemHealthStore.setModelCatalog(catalog)
@@ -344,7 +379,11 @@ func buildSystemHealthReport(ctx context.Context, sched *scheduler.Scheduler, ru
 		FullSweep:         systemHealthStore.fullSweepSnapshot(),
 	}
 
-	if runReq.Scope != "" && len(catalog) > 0 {
+	// 仅当上游 /models 真实可达时才跑逐模型探测，
+	// 否则上游每条请求都会卡满 HealthProbeTimeoutSec，
+	// 119 个模型 × 单并发 × 45s ≈ 90 分钟，前端早已超时但后端仍在空转。
+	// 这里短路掉无意义的全量扫描，让用户拿到一个"上游不可达"的清晰报告。
+	if runReq.Scope != "" && len(catalog) > 0 && modelsCheck.Success {
 		runResult := executeModelHealthRun(ctx, cfg, probeSelection.Plaintext, catalog, runReq)
 		report.ActiveRun = cloneHealthModelRun(runResult)
 		if runReq.Scope == "all" {
@@ -530,7 +569,13 @@ func runModelRunTasks(ctx context.Context, cfg models.SystemConfig, apiKey strin
 	if len(tasks) == 0 {
 		return nil
 	}
-	concurrency := 1
+	// 串行 1 个一个跑会让 100+ 模型的全量扫描动辄 1 小时以上，
+	// 上游 NVIDIA 是无状态的，按 Key 维度限速也只看总 QPS，
+	// 4 路并发既不会击穿 Key 又能把扫描时间压到原来的 1/4。
+	concurrency := 4
+	if concurrency > len(tasks) {
+		concurrency = len(tasks)
+	}
 	results := make([]healthModelRunCheck, len(tasks))
 	indexCh := make(chan int)
 	var wg sync.WaitGroup
@@ -548,11 +593,42 @@ func runModelRunTasks(ctx context.Context, cfg models.SystemConfig, apiKey strin
 			}
 		}()
 	}
+	// 分发的时候同时监听 ctx：上层 RunHealthReport 用 context.WithTimeout 给整个
+	// 调用封了顶（single=3min, all=10min）。一旦 ctx 到期就停止派任务，
+	// 已派出的 worker 内部也会因 ctx Done 拿到 deadline exceeded 立刻返回，
+	// 不会再继续往上游空打无用的探测请求。
+	dispatched := 0
+dispatch:
 	for idx := range tasks {
-		indexCh <- idx
+		select {
+		case <-ctx.Done():
+			break dispatch
+		case indexCh <- idx:
+			dispatched++
+		}
 	}
 	close(indexCh)
 	wg.Wait()
+	// 如果整次跑被 ctx 提前掐掉，剩下没派出去的任务在 results 里是零值
+	// （ModelID 为空）。把这些填成一条 Skipped 记录，方便前端看到"还有 N 个
+	// 模型因为整体超时没跑"，而不是直接消失，留下一堆莫名其妙的空条目。
+	if dispatched < len(tasks) {
+		now := time.Now()
+		for idx := dispatched; idx < len(tasks); idx++ {
+			if results[idx].ModelID != "" {
+				continue
+			}
+			task := tasks[idx]
+			results[idx] = healthModelRunCheck{
+				GeneratedAt: now,
+				ModelID:     task.ModelID,
+				Protocol:    task.Protocol,
+				StatusLabel: "Skipped",
+				Detail:      "整次健康检查已达到上限时间，剩余模型未执行。",
+				Meta:        map[string]any{"reason": "overall_run_timeout"},
+			}
+		}
+	}
 	sort.SliceStable(results, func(i, j int) bool { return results[i].ModelID < results[j].ModelID })
 	return results
 }

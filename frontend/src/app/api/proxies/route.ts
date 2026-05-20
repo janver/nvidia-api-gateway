@@ -18,9 +18,9 @@ async function forwardJson(res: Response, fallbackMessage: string) {
 export async function GET() {
   try {
     const res = await fetch(`${backend}/admin/proxies`, { cache: 'no-store' });
-    return forwardJson(res, '?????????');
+    return forwardJson(res, '读取代理列表失败。');
   } catch {
-    return NextResponse.json({ error: '?????????' }, { status: 500 });
+    return NextResponse.json({ error: '读取代理列表失败。' }, { status: 500 });
   }
 }
 
@@ -33,8 +33,8 @@ export async function POST(request: Request) {
       cache: 'no-store',
       body: JSON.stringify(body),
     });
-    return forwardJson(res, '???????');
+    return forwardJson(res, '新增代理失败。');
   } catch {
-    return NextResponse.json({ error: '???????' }, { status: 500 });
+    return NextResponse.json({ error: '新增代理失败。' }, { status: 500 });
   }
 }

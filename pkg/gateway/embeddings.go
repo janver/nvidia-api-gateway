@@ -19,6 +19,7 @@ func (g *Gateway) HandleOpenAIEmbeddings(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(openAIError("invalid_request_error", err.Error(), "invalid_request_error"))
 	}
 	masterKey, _ := c.Locals("masterKey").(*models.MasterKey)
+	affinityID := resolveConversationAffinityID(c.Get("X-Conversation-ID"), c.Body(), masterKey)
 	estTokens := EstimateTokens(meta.Prompt)
 	if err := g.usageTracker.Check(context.Background(), masterKey, estTokens); err != nil {
 		status := fiber.StatusTooManyRequests
@@ -29,7 +30,7 @@ func (g *Gateway) HandleOpenAIEmbeddings(c *fiber.Ctx) error {
 		}
 		return c.Status(status).JSON(openAIError(errorCode, err.Error(), "rate_limit_error"))
 	}
-	result := g.executeOpenAIJSONPath(context.Background(), translatedBody, "embeddings", estTokens, masterKey)
+	result := g.executeOpenAIJSONPath(context.Background(), translatedBody, "embeddings", estTokens, masterKey, affinityID)
 	if result.ContentType != "" {
 		c.Set("Content-Type", result.ContentType)
 	}
@@ -37,14 +38,17 @@ func (g *Gateway) HandleOpenAIEmbeddings(c *fiber.Ctx) error {
 	return c.Status(result.StatusCode).Send(result.Body)
 }
 
-func (g *Gateway) executeOpenAIJSONPath(ctx context.Context, translatedBody []byte, endpointPath string, estTokens int, masterKey *models.MasterKey) proxyResult {
+func (g *Gateway) executeOpenAIJSONPath(ctx context.Context, translatedBody []byte, endpointPath string, estTokens int, masterKey *models.MasterKey, affinityID string) proxyResult {
 	cfg := loadSystemConfig()
 	diagnostics := newUpstreamAttemptDiagnostics(endpointPath)
 	lastErr := "upstream request failed"
-	for i := 0; i < cfg.MaxRetries; i++ {
-		key, err := g.acquireKeyWithQueue(ctx, nil, nil, cfg.MaxConcurrency, false, endpointPath)
+	for i := 0; i < crossKeyAttemptBudget(cfg.MaxRetries); i++ {
+		key, reusedPreferredKey, err := g.acquirePreferredKeyWithQueue(ctx, nil, nil, cfg.MaxConcurrency, false, endpointPath, affinityID)
 		if key != "" {
 			diagnostics.noteSelectedKey(key)
+		}
+		if key != "" {
+			g.refreshConversationKeyBinding(affinityID, key, false)
 		}
 		if err != nil {
 			if err.Error() == "queue timeout" {
@@ -53,7 +57,7 @@ func (g *Gateway) executeOpenAIJSONPath(ctx context.Context, translatedBody []by
 			lastErr = err.Error()
 			continue
 		}
-		result, retry := g.callUpstreamJSONPath(ctx, cfg, key, endpointPath, translatedBody)
+		result, retry := g.callUpstreamJSONPath(ctx, cfg, key, endpointPath, translatedBody, affinityID)
 		_ = g.scheduler.ReleaseKey(ctx, key)
 		if retry {
 			diagnostics.noteRetry("上一个上游 NVIDIA 官方 Key 请求失败，已继续重试可用 Key")
@@ -63,6 +67,7 @@ func (g *Gateway) executeOpenAIJSONPath(ctx context.Context, translatedBody []by
 			continue
 		}
 		if result.StatusCode >= 200 && result.StatusCode < 300 {
+			g.refreshConversationKeyBinding(affinityID, key, !reusedPreferredKey)
 			if err := g.usageTracker.Record(ctx, masterKey, estTokens); err == nil {
 				incrementQuota(masterKey, estTokens)
 			}

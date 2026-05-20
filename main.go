@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -29,8 +30,18 @@ const (
 	defaultFrontendPort = "14000"
 )
 
+type managedCmd struct {
+	cmd     *exec.Cmd
+	logFile *os.File
+}
+
 func main() {
 	_ = godotenv.Load()
+	if logFile, err := configureBackendLogger(); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to open backend log file: %v\n", err)
+	} else if logFile != nil {
+		defer logFile.Close()
+	}
 
 	if len(os.Args) > 1 && os.Args[1] == "serve-all" {
 		serveAll()
@@ -74,7 +85,7 @@ func serveAll() {
 }
 
 func serveBackend() {
-	db.InitDB("gateway.json")
+	db.InitDB(resolveStorePath())
 
 	redisURL := strings.TrimSpace(os.Getenv("REDIS_URL"))
 	var redisClient *redis.Client
@@ -91,6 +102,8 @@ func serveBackend() {
 	}
 
 	sched := scheduler.NewScheduler(redisClient)
+	proxyImportManager := gateway.NewProxyImportManager(sched)
+	xrayManager := gateway.NewXrayCoreManager(sched)
 	if err := gateway.RestoreRecoverableStatuses(context.Background(), sched); err != nil {
 		log.Printf("initial status restore skipped: %v", err)
 		if loadErr := gateway.LoadActiveKeys(context.Background(), sched); loadErr != nil {
@@ -98,12 +111,15 @@ func serveBackend() {
 		}
 	}
 	go gateway.StartSchedulerRefresher(context.Background(), sched, 5*time.Minute)
+	go proxyImportManager.Start(context.Background())
+	go xrayManager.Start(context.Background())
 
 	semanticCache := cache.NewSemanticCache(redisClient)
 	usageTracker := middleware.NewUsageTracker(redisClient)
-	gw := gateway.NewGateway(sched, semanticCache, usageTracker)
+	gw := gateway.NewGateway(sched, semanticCache, usageTracker, xrayManager)
 
 	app := fiber.New(fiber.Config{DisableStartupMessage: true})
+	registerHealthRoute(app)
 
 	pr := prober.NewProber(redisClient, sched)
 	go pr.Start(context.Background())
@@ -115,7 +131,29 @@ func serveBackend() {
 	admin.Get("/keys", gateway.GetAPIKeys)
 	admin.Get("/proxies", gateway.GetUpstreamProxies)
 	admin.Post("/proxies", gateway.AddUpstreamProxy(sched))
+	admin.Post("/proxies/export", gateway.ExportUpstreamProxies)
+	admin.Delete("/proxies/batch", gateway.BulkDeleteUpstreamProxies(sched, xrayManager))
+	admin.Get("/proxies/import/free", gateway.GetProxyImportState(proxyImportManager))
+	admin.Post("/proxies/import/free", gateway.ImportFreeProxies(proxyImportManager))
+	admin.Put("/proxies/import/free", gateway.UpdateProxyImportSchedule(proxyImportManager))
+	admin.Delete("/proxies/import/free/logs", gateway.ClearProxyImportLogs())
+	admin.Get("/proxies/import/sources", gateway.GetExternalProxySources)
+	admin.Put("/proxies/import/sources", gateway.UpdateExternalProxySources)
+	admin.Get("/core/profiles", gateway.GetCoreProfiles(xrayManager))
+	admin.Post("/core/profiles", gateway.CreateCoreProfile(xrayManager))
+	admin.Post("/core/profiles/import", gateway.ImportCoreProfiles(xrayManager))
+	admin.Post("/core/profiles/test", gateway.BatchTestCoreProfiles(xrayManager))
+	admin.Delete("/core/profiles/batch", gateway.BulkDeleteCoreProfiles(xrayManager))
+	admin.Get("/core/runtime", gateway.GetCoreRuntime(xrayManager))
+	admin.Get("/core/runtime/logs", gateway.GetCoreRuntimeLogs(xrayManager))
+	admin.Delete("/core/runtime/logs", gateway.ClearCoreRuntimeLogs(xrayManager))
+	admin.Post("/core/runtime/reload", gateway.ReloadCoreRuntime(xrayManager))
+	admin.Put("/core/profiles/:id", gateway.UpdateCoreProfile(xrayManager))
+	admin.Patch("/core/profiles/:id/status", gateway.UpdateCoreProfileStatus(xrayManager))
+	admin.Delete("/core/profiles/:id", gateway.DeleteCoreProfile(xrayManager))
+	admin.Post("/core/profiles/:id/test", gateway.TestCoreProfile(xrayManager))
 	admin.Put("/proxies/:id", gateway.UpdateUpstreamProxy(sched))
+	admin.Patch("/proxies/status", gateway.BulkUpdateUpstreamProxyStatus(sched))
 	admin.Patch("/proxies/:id/status", gateway.UpdateUpstreamProxyStatus(sched))
 	admin.Delete("/proxies/:id", gateway.DeleteUpstreamProxy(sched))
 	admin.Post("/proxies/test", gateway.TestUpstreamProxy)
@@ -133,6 +171,7 @@ func serveBackend() {
 	admin.Post("/system/reload", gateway.ReloadSystem(sched))
 	admin.Get("/system/stats", gateway.SchedulerStats(sched))
 	admin.Get("/system/config", gateway.GetSystemConfig)
+	admin.Get("/system/proxy-options", gateway.GetUpstreamProxyOptions)
 	admin.Put("/system/config", gateway.UpdateSystemConfig(sched))
 	admin.Get("/upstream/models", gateway.GetUpstreamModels())
 	admin.Get("/upstream/runtime", gateway.GetUpstreamRuntime(sched))
@@ -158,6 +197,17 @@ func serveBackend() {
 	log.Fatal(app.Listen(":" + port))
 }
 
+func registerHealthRoute(app *fiber.App) {
+	if app == nil {
+		return
+	}
+	app.Get("/health", func(c *fiber.Ctx) error {
+		return c.JSON(fiber.Map{
+			"status":  "ok",
+			"service": "nvidia-api-gateway",
+		})
+	})
+}
 func resolveBackendPort() string {
 	return utils.ResolveBackendPort()
 }
@@ -170,7 +220,11 @@ func resolveFrontendPort() string {
 	return port
 }
 
-func startFrontend(frontendDir, backendPort string) (*exec.Cmd, error) {
+func resolveStorePath() string {
+	return utils.ResolveGatewayStoreDir()
+}
+
+func startFrontend(frontendDir, backendPort string) (*managedCmd, error) {
 	frontendPort := resolveFrontendPort()
 	env := append(os.Environ(),
 		"API_BASE_URL=http://localhost:"+backendPort,
@@ -181,13 +235,21 @@ func startFrontend(frontendDir, backendPort string) (*exec.Cmd, error) {
 		return nil, err
 	}
 
-	cmd := npmCommand(frontendDir, env, "run", "dev")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
+	logFile, err := openLogFile(utils.ResolveFrontendLogPath())
+	if err != nil {
 		return nil, err
 	}
-	return cmd, nil
+	stdoutWriter := io.MultiWriter(os.Stdout, logFile)
+	stderrWriter := io.MultiWriter(os.Stderr, logFile)
+
+	cmd := npmCommand(frontendDir, env, "run", "dev")
+	cmd.Stdout = stdoutWriter
+	cmd.Stderr = stderrWriter
+	if err := cmd.Start(); err != nil {
+		_ = logFile.Close()
+		return nil, err
+	}
+	return &managedCmd{cmd: cmd, logFile: logFile}, nil
 }
 
 func ensureFrontendDependencies(frontendDir string, env []string) error {
@@ -199,9 +261,17 @@ func ensureFrontendDependencies(frontendDir string, env []string) error {
 	}
 
 	log.Printf("frontend dependencies missing, running npm install in %s", frontendDir)
+	logFile, err := openLogFile(utils.ResolveFrontendLogPath())
+	if err != nil {
+		return err
+	}
+	defer logFile.Close()
+	stdoutWriter := io.MultiWriter(os.Stdout, logFile)
+	stderrWriter := io.MultiWriter(os.Stderr, logFile)
+
 	cmd := npmCommand(frontendDir, env, "install")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = stdoutWriter
+	cmd.Stderr = stderrWriter
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("npm install failed: %w", err)
 	}
@@ -232,19 +302,44 @@ func nextBinaryName() string {
 	return "next"
 }
 
-func stopProcess(cmd *exec.Cmd) {
-	if cmd == nil || cmd.Process == nil {
-		return
+func openLogFile(path string) (*os.File, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, err
 	}
-	_ = cmd.Process.Kill()
-	_, _ = cmd.Process.Wait()
+	return os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 }
 
-func waitForProcess(cmd *exec.Cmd) {
-	if cmd == nil {
+func configureBackendLogger() (*os.File, error) {
+	logFile, err := openLogFile(utils.ResolveBackendLogPath())
+	if err != nil {
+		return nil, err
+	}
+	log.SetOutput(io.MultiWriter(os.Stdout, logFile))
+	return logFile, nil
+}
+
+func stopProcess(proc *managedCmd) {
+	if proc == nil {
 		return
 	}
-	if err := cmd.Wait(); err != nil {
+	if proc.cmd != nil && proc.cmd.Process != nil {
+		_ = proc.cmd.Process.Kill()
+		_, _ = proc.cmd.Process.Wait()
+	}
+	if proc.logFile != nil {
+		_ = proc.logFile.Close()
+	}
+}
+
+func waitForProcess(proc *managedCmd) {
+	if proc == nil || proc.cmd == nil {
+		return
+	}
+	err := proc.cmd.Wait()
+	if proc.logFile != nil {
+		_ = proc.logFile.Close()
+	}
+	if err != nil {
 		log.Fatalf("frontend process exited: %v", err)
 	}
 }

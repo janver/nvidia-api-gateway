@@ -28,9 +28,9 @@ export async function PUT(
       cache: 'no-store',
       body: JSON.stringify(body),
     });
-    return forwardJson(res, '???????');
+    return forwardJson(res, '更新代理失败。');
   } catch {
-    return NextResponse.json({ error: '???????' }, { status: 500 });
+    return NextResponse.json({ error: '更新代理失败。' }, { status: 500 });
   }
 }
 
@@ -44,8 +44,8 @@ export async function DELETE(
       method: 'DELETE',
       cache: 'no-store',
     });
-    return forwardJson(res, '???????');
+    return forwardJson(res, '删除代理失败。');
   } catch {
-    return NextResponse.json({ error: '???????' }, { status: 500 });
+    return NextResponse.json({ error: '删除代理失败。' }, { status: 500 });
   }
 }

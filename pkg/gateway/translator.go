@@ -65,12 +65,28 @@ func TranslateRequest(body []byte) ([]byte, *ChatRequest, string, *float64, erro
 	}
 	reqMap["model"] = model
 	delete(reqMap, "logit_bias")
+	if toolChoice, ok := normalizeToolChoice(reqMap["tool_choice"]); ok {
+		reqMap["tool_choice"] = toolChoice
+	} else {
+		delete(reqMap, "tool_choice")
+	}
 
 	messages, ok := normalizeOpenAIMessages(reqMap["messages"])
 	if !ok || len(messages) == 0 {
 		return nil, nil, "", nil, fmt.Errorf("messages are required")
 	}
 	reqMap["messages"] = messages
+
+	// 确保 max_tokens 足够大，避免长回复被截断
+	// 注意：这是单次输出上限，不是上下文长度。大多数模型输出上限是 4K-16K，
+	// 设置 32768 足够覆盖 99% 的场景。过大的值可能被上游拒绝。
+	if maxTokens, ok := intValue(reqMap["max_tokens"]); ok {
+		if maxTokens < 32768 {
+			reqMap["max_tokens"] = 32768
+		}
+	} else {
+		reqMap["max_tokens"] = 32768
+	}
 
 	prompt := buildPromptFromMessages(messages)
 	stream, _ := boolValue(reqMap["stream"])
@@ -112,7 +128,14 @@ func TranslateClaudeRequest(body []byte) ([]byte, string, *float64, bool, string
 		openAIReq["temperature"] = temp
 	}
 	if maxTokens, ok := intValue(reqMap["max_tokens"]); ok {
+		// 确保 max_tokens 足够大，避免长回复被截断导致 Claude Code 中断
+		// 注意：这是单次输出上限，不是上下文长度。32768 足够覆盖大部分模型
+		if maxTokens < 32768 {
+			maxTokens = 32768
+		}
 		openAIReq["max_tokens"] = maxTokens
+	} else {
+		openAIReq["max_tokens"] = 32768
 	}
 	if system := strings.TrimSpace(extractClaudeSystem(reqMap["system"])); system != "" {
 		openAIReq["messages"] = append(openAIReq["messages"].([]map[string]any), map[string]any{
@@ -185,8 +208,16 @@ func TranslateGeminiRequest(routeTarget string, body []byte, stream bool) ([]byt
 			openAIReq["temperature"] = temp
 		}
 		if maxTokens, ok := intValue(generationConfig["maxOutputTokens"]); ok {
+			if maxTokens < 32768 {
+				maxTokens = 32768
+			}
 			openAIReq["max_tokens"] = maxTokens
+		} else {
+			openAIReq["max_tokens"] = 32768
 		}
+	} else {
+		// 没有 generationConfig 时也设置 max_tokens
+		openAIReq["max_tokens"] = 32768
 	}
 	contents, ok := reqMap["contents"].([]any)
 	if !ok || len(contents) == 0 {
@@ -384,13 +415,27 @@ func normalizeOpenAIMessages(raw any) ([]map[string]any, bool) {
 		}
 		role := normalizeRole(stringValue(msgMap["role"]))
 		content := extractOpenAIContent(msgMap["content"])
-		if role == "" || content == "" {
+		if role == "" || (content == "" && role != "assistant") {
 			continue
 		}
-		messages = append(messages, map[string]any{
+		normalized := map[string]any{
 			"role":    role,
 			"content": content,
-		})
+		}
+		if role == "assistant" {
+			if toolCalls, ok := normalizeOpenAIToolCalls(msgMap["tool_calls"]); ok {
+				normalized["tool_calls"] = toolCalls
+			}
+		}
+		if role == "tool" {
+			if toolCallID := strings.TrimSpace(stringValue(msgMap["tool_call_id"])); toolCallID != "" {
+				normalized["tool_call_id"] = toolCallID
+			}
+			if name := strings.TrimSpace(stringValue(msgMap["name"])); name != "" {
+				normalized["name"] = name
+			}
+		}
+		messages = append(messages, normalized)
 	}
 	return messages, true
 }
@@ -404,6 +449,58 @@ func convertMessagesForMeta(messages []map[string]any) []ChatMessage {
 		})
 	}
 	return result
+}
+
+func normalizeOpenAIToolCalls(raw any) ([]map[string]any, bool) {
+	parsed := parseToolCalls(raw)
+	if len(parsed) == 0 {
+		return nil, false
+	}
+	items := make([]map[string]any, 0, len(parsed))
+	for _, toolCall := range parsed {
+		items = append(items, map[string]any{
+			"id":   firstNonEmpty(toolCall.ID, newCallID()),
+			"type": firstNonEmpty(toolCall.Type, "function"),
+			"function": map[string]any{
+				"name":      toolCall.Function.Name,
+				"arguments": normalizeJSONString(toolCall.Function.Arguments),
+			},
+		})
+	}
+	return items, true
+}
+
+func normalizeToolChoice(raw any) (any, bool) {
+	switch v := raw.(type) {
+	case nil:
+		return nil, false
+	case string:
+		value := strings.TrimSpace(v)
+		if value == "" {
+			return nil, false
+		}
+		switch strings.ToLower(value) {
+		case "auto", "none", "required":
+			return strings.ToLower(value), true
+		default:
+			return value, true
+		}
+	case map[string]any:
+		if mode := strings.ToLower(strings.TrimSpace(stringValue(v["type"]))); mode == "none" || mode == "required" {
+			return mode, true
+		}
+		if functionMap, ok := v["function"].(map[string]any); ok {
+			if strings.TrimSpace(stringValue(functionMap["name"])) != "" {
+				return "auto", true
+			}
+		}
+		if name := strings.TrimSpace(stringValue(v["name"])); name != "" {
+			return "auto", true
+		}
+		return nil, false
+	default:
+		return nil, false
+	}
 }
 
 func extractOpenAIContent(raw any) string {
@@ -597,6 +694,8 @@ func normalizeRole(role string) string {
 		return "assistant"
 	case "system":
 		return "system"
+	case "tool":
+		return "tool"
 	default:
 		return "user"
 	}
@@ -630,7 +729,9 @@ func extractGeminiModel(routeTarget string) string {
 func mapFinishReasonToClaude(reason string) any {
 	switch strings.TrimSpace(reason) {
 	case "length":
-		return "max_tokens"
+		// 不返回 max_tokens，否则 Claude Code 会认为回复被截断而中断任务
+		// 返回 end_turn 让客户端认为这是正常结束
+		return "end_turn"
 	case "tool_calls":
 		return "tool_use"
 	case "stop", "":
@@ -643,7 +744,8 @@ func mapFinishReasonToClaude(reason string) any {
 func mapFinishReasonToGemini(reason string) string {
 	switch strings.TrimSpace(reason) {
 	case "length":
-		return "MAX_TOKENS"
+		// 不返回 MAX_TOKENS，避免客户端认为被截断
+		return "STOP"
 	case "tool_calls":
 		return "STOP"
 	case "stop", "":

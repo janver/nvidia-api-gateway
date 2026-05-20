@@ -11,6 +11,7 @@ type translatedResponsesRequest struct {
 	Prompt         string
 	Temperature    *float64
 	Stream         bool
+	Messages       []map[string]any
 }
 
 func TranslateResponsesRequest(body []byte) ([]byte, *translatedResponsesRequest, error) {
@@ -24,9 +25,8 @@ func TranslateResponsesRequest(body []byte) ([]byte, *translatedResponsesRequest
 	}
 
 	openAIReq := map[string]any{
-		"model":    normalizeModel(requestedModel),
-		"stream":   false,
-		"messages": make([]map[string]any, 0),
+		"model":  normalizeModel(requestedModel),
+		"stream": false,
 	}
 	if stream, ok := boolValue(reqMap["stream"]); ok {
 		openAIReq["stream"] = stream
@@ -42,34 +42,48 @@ func TranslateResponsesRequest(body []byte) ([]byte, *translatedResponsesRequest
 	if tools, ok := normalizeResponsesTools(reqMap["tools"]); ok && len(tools) > 0 {
 		openAIReq["tools"] = tools
 	}
-	if toolChoice, exists := reqMap["tool_choice"]; exists {
+	if toolChoice, ok := normalizeToolChoice(reqMap["tool_choice"]); ok {
 		openAIReq["tool_choice"] = toolChoice
 	}
-	if instructions := strings.TrimSpace(extractResponsesInstructions(reqMap["instructions"])); instructions != "" {
-		openAIReq["messages"] = append(openAIReq["messages"].([]map[string]any), map[string]any{
-			"role":    "system",
-			"content": instructions,
-		})
-	}
 
-	var messages []map[string]any
+	var currentMessages []map[string]any
 	switch {
 	case reqMap["messages"] != nil:
 		normalized, ok := normalizeOpenAIMessages(reqMap["messages"])
 		if !ok || len(normalized) == 0 {
 			return nil, nil, fmt.Errorf("messages are required")
 		}
-		messages = normalized
+		currentMessages = normalized
 	case reqMap["input"] != nil:
 		normalized, ok := normalizeResponsesInput(reqMap["input"])
 		if !ok || len(normalized) == 0 {
 			return nil, nil, fmt.Errorf("input is required")
 		}
-		messages = normalized
+		currentMessages = normalized
 	default:
 		return nil, nil, fmt.Errorf("input or messages is required")
 	}
-	openAIReq["messages"] = append(openAIReq["messages"].([]map[string]any), messages...)
+
+	finalMessages := make([]map[string]any, 0, len(currentMessages)+1)
+	previousResponseID := strings.TrimSpace(stringValue(reqMap["previous_response_id"]))
+	if previousResponseID != "" {
+		previousMessages, ok := responsesStore.conversation(previousResponseID)
+		if !ok || len(previousMessages) == 0 {
+			return nil, nil, fmt.Errorf("previous_response_id was not found or expired")
+		}
+		finalMessages = append(finalMessages, previousMessages...)
+	}
+	if instructions := strings.TrimSpace(extractResponsesInstructions(reqMap["instructions"])); instructions != "" {
+		finalMessages = append(finalMessages, map[string]any{
+			"role":    "system",
+			"content": instructions,
+		})
+	}
+	finalMessages = append(finalMessages, currentMessages...)
+	if len(finalMessages) == 0 {
+		return nil, nil, fmt.Errorf("input or messages is required")
+	}
+	openAIReq["messages"] = finalMessages
 
 	translated, err := json.Marshal(openAIReq)
 	if err != nil {
@@ -79,9 +93,10 @@ func TranslateResponsesRequest(body []byte) ([]byte, *translatedResponsesRequest
 	temperature, _ := floatPtrValue(openAIReq["temperature"])
 	return translated, &translatedResponsesRequest{
 		RequestedModel: requestedModel,
-		Prompt:         buildPromptFromMessageMaps(openAIReq["messages"].([]map[string]any)),
+		Prompt:         buildPromptFromMessageMaps(finalMessages),
 		Temperature:    temperature,
 		Stream:         stream,
+		Messages:       cloneStoredConversation(finalMessages),
 	}, nil
 }
 
@@ -106,9 +121,19 @@ func normalizeResponsesInput(raw any) ([]map[string]any, bool) {
 				if roleRaw, hasRole := entry["role"]; hasRole {
 					role := normalizeResponsesRole(stringValue(roleRaw))
 					content := extractResponsesContent(entry["content"])
-					if role != "" && content != "" {
-						messages = append(messages, map[string]any{"role": role, "content": content})
+					if role == "" || content == "" {
+						continue
 					}
+					normalized := map[string]any{"role": role, "content": content}
+					if role == "tool" {
+						if toolCallID := strings.TrimSpace(stringValue(entry["tool_call_id"])); toolCallID != "" {
+							normalized["tool_call_id"] = toolCallID
+						}
+						if name := strings.TrimSpace(stringValue(entry["name"])); name != "" {
+							normalized["name"] = name
+						}
+					}
+					messages = append(messages, normalized)
 					continue
 				}
 				typ := strings.ToLower(strings.TrimSpace(stringValue(entry["type"])))
@@ -127,12 +152,28 @@ func normalizeResponsesInput(raw any) ([]map[string]any, bool) {
 					role := normalizeResponsesRole(stringValue(entry["role"]))
 					content := extractResponsesContent(entry["content"])
 					if role != "" && content != "" {
-						messages = append(messages, map[string]any{"role": role, "content": content})
+						normalized := map[string]any{"role": role, "content": content}
+						if role == "tool" {
+							if toolCallID := strings.TrimSpace(stringValue(entry["tool_call_id"])); toolCallID != "" {
+								normalized["tool_call_id"] = toolCallID
+							}
+							if name := strings.TrimSpace(stringValue(entry["name"])); name != "" {
+								normalized["name"] = name
+							}
+						}
+						messages = append(messages, normalized)
 					}
 				case "function_call_output":
-					content := extractResponsesContent(entry["output"])
+					content := normalizeToolOutput(entry["output"])
 					if content != "" {
-						messages = append(messages, map[string]any{"role": "user", "content": content})
+						normalized := map[string]any{"role": "tool", "content": content}
+						if toolCallID := strings.TrimSpace(stringValue(entry["call_id"])); toolCallID != "" {
+							normalized["tool_call_id"] = toolCallID
+						}
+						if name := strings.TrimSpace(stringValue(entry["name"])); name != "" {
+							normalized["name"] = name
+						}
+						messages = append(messages, normalized)
 					}
 				}
 			}
@@ -150,7 +191,7 @@ func normalizeResponsesRole(role string) string {
 	case "system", "developer":
 		return "system"
 	case "tool":
-		return "user"
+		return "tool"
 	default:
 		return "user"
 	}
@@ -206,6 +247,23 @@ func extractResponsesContent(raw any) string {
 	default:
 		return ""
 	}
+}
+
+func normalizeToolOutput(raw any) string {
+	if raw == nil {
+		return ""
+	}
+	if text := extractResponsesContent(raw); text != "" {
+		return text
+	}
+	if text, ok := raw.(string); ok {
+		return strings.TrimSpace(text)
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(encoded))
 }
 
 func normalizeResponsesTools(raw any) ([]map[string]any, bool) {

@@ -249,6 +249,126 @@ func TestAdminUpstreamModelsAndHealthRuns(t *testing.T) {
 	}
 }
 
+// TestRunHealthReportSkipsModelSweepWhenUpstreamModelsFail 保证：
+// 上游 /models 不可达时，不会再去对所有缓存里的模型做 N 次单独探测——
+// 之前那条路径会让 119 个模型的 45s 串行超时，前端表现为 "卡住、永远拉不出结果"。
+// 同时 GetUpstreamModels 应该返回上一次成功拉到的目录加 warning，而不是 500。
+func TestRunHealthReportSkipsModelSweepWhenUpstreamModelsFail(t *testing.T) {
+	systemHealthStore = &healthReportStore{}
+
+	failModels := false
+	perModelCallCount := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			if failModels {
+				http.Error(w, "models temporarily unavailable", http.StatusBadGateway)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{
+				"data": []map[string]any{
+					{"id": "meta/llama-3.1-8b-instruct"},
+					{"id": "nvidia/nv-embed-v1"},
+				},
+			})
+		case "/v1/chat/completions":
+			perModelCallCount++
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"O\"}}]}\n\n"))
+		case "/v1/embeddings":
+			perModelCallCount++
+			writeJSON(w, http.StatusOK, map[string]any{
+				"model": "nvidia/nv-embed-v1",
+				"data":  []map[string]any{{"embedding": []float64{0.1, 0.2}}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	sched := prepareGatewayTestState(t, upstream.URL+"/v1", []testAPIKey{{Name: "NVIDIA-01", Plaintext: "good-key", Weight: 1, Status: APIKeyStatusActive}})
+	app := fiber.New()
+	app.Get("/admin/upstream/models", GetUpstreamModels())
+	app.Post("/admin/health/report/run", RunHealthReport(sched))
+
+	// 1) 先跑一次成功的全量扫描，把目录写到内存缓存里。
+	first := httptest.NewRequest(http.MethodPost, "/admin/health/report/run", strings.NewReader(`{"scope":"all","protocol":"auto"}`))
+	first.Header.Set("Content-Type", "application/json")
+	firstResp, err := app.Test(first)
+	if err != nil {
+		t.Fatalf("first health run failed: %v", err)
+	}
+	defer firstResp.Body.Close()
+	var firstReport healthReport
+	if err := json.NewDecoder(firstResp.Body).Decode(&firstReport); err != nil {
+		t.Fatalf("decode first report: %v", err)
+	}
+	if firstReport.FullSweep == nil || firstReport.FullSweep.Summary.Total != 2 {
+		t.Fatalf("expected initial fullSweep total 2, got %+v", firstReport.FullSweep)
+	}
+	if len(firstReport.ModelCatalog) != 2 {
+		t.Fatalf("expected catalog of 2, got %d", len(firstReport.ModelCatalog))
+	}
+
+	// 2) 把上游 /models 切到 502，再跑一次全量扫描。
+	// 关键期望：本次不再触发任何 /chat/completions or /embeddings 探测。
+	failModels = true
+	perModelCallCount = 0
+	second := httptest.NewRequest(http.MethodPost, "/admin/health/report/run", strings.NewReader(`{"scope":"all","protocol":"auto"}`))
+	second.Header.Set("Content-Type", "application/json")
+	secondResp, err := app.Test(second)
+	if err != nil {
+		t.Fatalf("second health run failed: %v", err)
+	}
+	defer secondResp.Body.Close()
+	var secondReport healthReport
+	if err := json.NewDecoder(secondResp.Body).Decode(&secondReport); err != nil {
+		t.Fatalf("decode second report: %v", err)
+	}
+	// 基线 3 个 checks 里 nvidia_models 一定要失败。
+	var modelsCheck *healthCheckResult
+	for i := range secondReport.Checks {
+		if secondReport.Checks[i].ID == "nvidia_models" {
+			modelsCheck = &secondReport.Checks[i]
+			break
+		}
+	}
+	if modelsCheck == nil || modelsCheck.Success {
+		t.Fatalf("expected nvidia_models check to be failed, got %+v", modelsCheck)
+	}
+	// 关键：扫描被跳过，per-model 端点完全没有被打到。
+	// 不要看 chat/embeddings baseline 探测——它们靠 chooseChatHealthModel 在 availableModels 为空时会 Skipped。
+	if perModelCallCount != 0 {
+		t.Fatalf("expected zero per-model probes after /models failure, got %d", perModelCallCount)
+	}
+
+	// 3) GetUpstreamModels 在上游挂掉的情况下要降级返回缓存目录 + warning，
+	// 而不是返回 500 让前端整个下拉空掉。
+	cachedResp, err := app.Test(httptest.NewRequest(http.MethodGet, "/admin/upstream/models", nil))
+	if err != nil {
+		t.Fatalf("cached upstream models request failed: %v", err)
+	}
+	defer cachedResp.Body.Close()
+	if cachedResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 with cached fallback, got %d", cachedResp.StatusCode)
+	}
+	var cachedPayload upstreamModelsResponse
+	if err := json.NewDecoder(cachedResp.Body).Decode(&cachedPayload); err != nil {
+		t.Fatalf("decode cached models: %v", err)
+	}
+	if !cachedPayload.Cached {
+		t.Fatalf("expected cached=true on fallback, got %+v", cachedPayload)
+	}
+	if cachedPayload.Warning == "" {
+		t.Fatalf("expected warning to be set on fallback")
+	}
+	if len(cachedPayload.Models) != 2 {
+		t.Fatalf("expected 2 cached models, got %d", len(cachedPayload.Models))
+	}
+}
+
 type testAPIKey struct {
 	Name      string
 	Plaintext string

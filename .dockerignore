@@ -1,0 +1,7 @@
+.git
+frontend/node_modules
+frontend/.next
+bin/xray
+gateway.json
+*.bak
+*.log

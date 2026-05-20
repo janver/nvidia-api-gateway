@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
 )
@@ -24,7 +25,7 @@ func TestRelayOpenAIStreamToClaudeTranslator(t *testing.T) {
 		toolBlocks: make(map[int]*claudeToolBlock),
 	}
 
-	if err := relayOpenAIStream(strings.NewReader(stream), translator); err != nil {
+	if err := relayOpenAIStream(context.Background(), strings.NewReader(stream), translator, streamRelayOptions{Writer: &buf}); err != nil {
 		t.Fatalf("relayOpenAIStream failed: %v", err)
 	}
 	output := buf.String()
@@ -53,14 +54,14 @@ func TestRelayOpenAIStreamToGeminiTranslator(t *testing.T) {
 		toolCalls: make(map[int]*geminiToolCallState),
 	}
 
-	if err := relayOpenAIStream(strings.NewReader(stream), translator); err != nil {
+	if err := relayOpenAIStream(context.Background(), strings.NewReader(stream), translator, streamRelayOptions{Writer: &buf}); err != nil {
 		t.Fatalf("relayOpenAIStream failed: %v", err)
 	}
 	output := buf.String()
 	if count := strings.Count(output, "data: "); count < 3 {
 		t.Fatalf("expected multiple gemini data frames, got %d in %s", count, output)
 	}
-	for _, needle := range []string{"Part-1", "Part-2", `"finishReason":"MAX_TOKENS"`, `"totalTokenCount":7`} {
+	for _, needle := range []string{"Part-1", "Part-2", `"finishReason":"STOP"`, `"totalTokenCount":7`} {
 		if !strings.Contains(output, needle) {
 			t.Fatalf("expected output to contain %q, got %s", needle, output)
 		}

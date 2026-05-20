@@ -24,8 +24,8 @@ export async function POST(request: Request) {
       cache: 'no-store',
       body: JSON.stringify(body),
     });
-    return forwardJson(res, '???????');
+    return forwardJson(res, '测试代理失败。');
   } catch {
-    return NextResponse.json({ error: '???????' }, { status: 500 });
+    return NextResponse.json({ error: '测试代理失败。' }, { status: 500 });
   }
 }

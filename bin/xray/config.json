@@ -1,0 +1,921 @@
+{
+  "inbounds": [
+    {
+      "listen": "127.0.0.1",
+      "port": 21005,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "integrate.api.nvidia.com",
+        "network": "tcp",
+        "port": 443
+      },
+      "tag": "in-core-5"
+    },
+    {
+      "listen": "127.0.0.1",
+      "port": 21001,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "integrate.api.nvidia.com",
+        "network": "tcp",
+        "port": 443
+      },
+      "tag": "in-core-6"
+    },
+    {
+      "listen": "127.0.0.1",
+      "port": 21002,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "integrate.api.nvidia.com",
+        "network": "tcp",
+        "port": 443
+      },
+      "tag": "in-core-7"
+    },
+    {
+      "listen": "127.0.0.1",
+      "port": 21004,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "integrate.api.nvidia.com",
+        "network": "tcp",
+        "port": 443
+      },
+      "tag": "in-core-9"
+    },
+    {
+      "listen": "127.0.0.1",
+      "port": 21006,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "integrate.api.nvidia.com",
+        "network": "tcp",
+        "port": 443
+      },
+      "tag": "in-core-10"
+    },
+    {
+      "listen": "127.0.0.1",
+      "port": 21008,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "integrate.api.nvidia.com",
+        "network": "tcp",
+        "port": 443
+      },
+      "tag": "in-core-12"
+    },
+    {
+      "listen": "127.0.0.1",
+      "port": 21009,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "integrate.api.nvidia.com",
+        "network": "tcp",
+        "port": 443
+      },
+      "tag": "in-core-13"
+    },
+    {
+      "listen": "127.0.0.1",
+      "port": 21010,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "integrate.api.nvidia.com",
+        "network": "tcp",
+        "port": 443
+      },
+      "tag": "in-core-14"
+    },
+    {
+      "listen": "127.0.0.1",
+      "port": 21011,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "integrate.api.nvidia.com",
+        "network": "tcp",
+        "port": 443
+      },
+      "tag": "in-core-15"
+    },
+    {
+      "listen": "127.0.0.1",
+      "port": 21012,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "integrate.api.nvidia.com",
+        "network": "tcp",
+        "port": 443
+      },
+      "tag": "in-core-16"
+    },
+    {
+      "listen": "127.0.0.1",
+      "port": 21013,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "integrate.api.nvidia.com",
+        "network": "tcp",
+        "port": 443
+      },
+      "tag": "in-core-17"
+    },
+    {
+      "listen": "127.0.0.1",
+      "port": 21014,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "integrate.api.nvidia.com",
+        "network": "tcp",
+        "port": 443
+      },
+      "tag": "in-core-18"
+    },
+    {
+      "listen": "127.0.0.1",
+      "port": 21015,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "integrate.api.nvidia.com",
+        "network": "tcp",
+        "port": 443
+      },
+      "tag": "in-core-19"
+    },
+    {
+      "listen": "127.0.0.1",
+      "port": 21016,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "integrate.api.nvidia.com",
+        "network": "tcp",
+        "port": 443
+      },
+      "tag": "in-core-20"
+    },
+    {
+      "listen": "127.0.0.1",
+      "port": 21017,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "integrate.api.nvidia.com",
+        "network": "tcp",
+        "port": 443
+      },
+      "tag": "in-core-21"
+    },
+    {
+      "listen": "127.0.0.1",
+      "port": 21018,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "integrate.api.nvidia.com",
+        "network": "tcp",
+        "port": 443
+      },
+      "tag": "in-core-22"
+    },
+    {
+      "listen": "127.0.0.1",
+      "port": 21019,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "integrate.api.nvidia.com",
+        "network": "tcp",
+        "port": 443
+      },
+      "tag": "in-core-23"
+    },
+    {
+      "listen": "127.0.0.1",
+      "port": 21020,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "integrate.api.nvidia.com",
+        "network": "tcp",
+        "port": 443
+      },
+      "tag": "in-core-24"
+    },
+    {
+      "listen": "127.0.0.1",
+      "port": 21022,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "integrate.api.nvidia.com",
+        "network": "tcp",
+        "port": 443
+      },
+      "tag": "in-core-26"
+    },
+    {
+      "listen": "127.0.0.1",
+      "port": 21023,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "integrate.api.nvidia.com",
+        "network": "tcp",
+        "port": 443
+      },
+      "tag": "in-core-27"
+    },
+    {
+      "listen": "127.0.0.1",
+      "port": 21024,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "integrate.api.nvidia.com",
+        "network": "tcp",
+        "port": 443
+      },
+      "tag": "in-core-28"
+    },
+    {
+      "listen": "127.0.0.1",
+      "port": 21025,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "integrate.api.nvidia.com",
+        "network": "tcp",
+        "port": 443
+      },
+      "tag": "in-core-29"
+    }
+  ],
+  "log": {
+    "loglevel": "error"
+  },
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "tag": "direct"
+    },
+    {
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "3xui.yujunxue.cn",
+            "port": 10282,
+            "users": [
+              {
+                "encryption": "none",
+                "flow": "",
+                "id": "4bb2c86f-2db4-4b69-92f5-6c18cb6613d1"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "realitySettings": {
+          "fingerprint": "chrome",
+          "publicKey": "EYyla7o8_vCe3hUmmYqev7JN_H0GWV1GUgOdPt2AHSU",
+          "serverName": "www.tesla.com",
+          "shortId": "d975d1f5",
+          "spiderX": "/"
+        },
+        "security": "reality"
+      },
+      "tag": "out-core-5"
+    },
+    {
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "82.198.246.97",
+            "port": 180,
+            "users": [
+              {
+                "id": "d13fc2f5-3e05-4795-81eb-44143a09e552",
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      },
+      "tag": "out-core-6"
+    },
+    {
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "82.198.246.97",
+            "port": 180,
+            "users": [
+              {
+                "id": "d13fc2f5-3e05-4795-81eb-44143a09e552",
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      },
+      "tag": "out-core-7"
+    },
+    {
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "82.198.246.233",
+            "port": 180,
+            "users": [
+              {
+                "id": "d13fc2f5-3e05-4795-81eb-44143a09e552",
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      },
+      "tag": "out-core-9"
+    },
+    {
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "82.198.246.250",
+            "port": 180,
+            "users": [
+              {
+                "id": "d13fc2f5-3e05-4795-81eb-44143a09e552",
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      },
+      "tag": "out-core-10"
+    },
+    {
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "82.198.246.97",
+            "port": 180,
+            "users": [
+              {
+                "id": "d13fc2f5-3e05-4795-81eb-44143a09e552",
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      },
+      "tag": "out-core-12"
+    },
+    {
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "82.198.246.97",
+            "port": 180,
+            "users": [
+              {
+                "id": "d13fc2f5-3e05-4795-81eb-44143a09e552",
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      },
+      "tag": "out-core-13"
+    },
+    {
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "82.198.246.97",
+            "port": 180,
+            "users": [
+              {
+                "id": "d13fc2f5-3e05-4795-81eb-44143a09e552",
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      },
+      "tag": "out-core-14"
+    },
+    {
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "82.198.246.97",
+            "port": 180,
+            "users": [
+              {
+                "id": "d13fc2f5-3e05-4795-81eb-44143a09e552",
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      },
+      "tag": "out-core-15"
+    },
+    {
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "82.198.246.97",
+            "port": 180,
+            "users": [
+              {
+                "id": "d13fc2f5-3e05-4795-81eb-44143a09e552",
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      },
+      "tag": "out-core-16"
+    },
+    {
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "82.198.246.97",
+            "port": 180,
+            "users": [
+              {
+                "id": "d13fc2f5-3e05-4795-81eb-44143a09e552",
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      },
+      "tag": "out-core-17"
+    },
+    {
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "82.198.246.214",
+            "port": 180,
+            "users": [
+              {
+                "id": "d13fc2f5-3e05-4795-81eb-44143a09e552",
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      },
+      "tag": "out-core-18"
+    },
+    {
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "141.11.197.127",
+            "port": 55269,
+            "users": [
+              {
+                "encryption": "none",
+                "flow": "",
+                "id": "231e88bb-3a39-4f26-848e-908f83070283"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "realitySettings": {
+          "fingerprint": "chrome",
+          "publicKey": "i1e3hqslC-n7XGp72HmDKU7ZuRk72pHbzujbNaYF-0s",
+          "serverName": "vk.ru",
+          "shortId": "8f",
+          "spiderX": ""
+        },
+        "security": "reality"
+      },
+      "tag": "out-core-19"
+    },
+    {
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "vltch.mostserv.xyz",
+            "port": 443,
+            "users": [
+              {
+                "encryption": "none",
+                "flow": "xtls-rprx-vision",
+                "id": "37253a6a-2a9b-42bb-992c-b5f1b1ef1791"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "realitySettings": {
+          "fingerprint": "chrome",
+          "publicKey": "3WzSgL8uXA3vE3IHrfdBpJmOO4MYrsWpczDSY_jJRjI",
+          "serverName": "vltch.mostserv.xyz",
+          "shortId": "226509f017e4c36d",
+          "spiderX": ""
+        },
+        "security": "reality"
+      },
+      "tag": "out-core-20"
+    },
+    {
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "103.181.164.145",
+            "port": 54022,
+            "users": [
+              {
+                "id": "418048af-a293-4b99-9b0c-98ca3580dd24",
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      },
+      "tag": "out-core-21"
+    },
+    {
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "103.181.164.145",
+            "port": 51556,
+            "users": [
+              {
+                "id": "418048af-a293-4b99-9b0c-98ca3580dd24",
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      },
+      "tag": "out-core-22"
+    },
+    {
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "82.198.246.250",
+            "port": 180,
+            "users": [
+              {
+                "id": "d13fc2f5-3e05-4795-81eb-44143a09e552",
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      },
+      "tag": "out-core-23"
+    },
+    {
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "159.195.82.187",
+            "port": 9443,
+            "users": [
+              {
+                "encryption": "none",
+                "flow": "xtls-rprx-vision",
+                "id": "4649d681-7f26-4959-a3f2-02eb8866230f"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "realitySettings": {
+          "fingerprint": "chrome",
+          "publicKey": "wAYsJ6RJXFy94w_WaTIhp1ZfCePAPoZmP27RarvUqXg",
+          "serverName": "yahoo.com",
+          "shortId": "2344766a270a6298",
+          "spiderX": ""
+        },
+        "security": "reality"
+      },
+      "tag": "out-core-24"
+    },
+    {
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "82.198.246.250",
+            "port": 180,
+            "users": [
+              {
+                "id": "d13fc2f5-3e05-4795-81eb-44143a09e552",
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      },
+      "tag": "out-core-26"
+    },
+    {
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "82.198.246.233",
+            "port": 180,
+            "users": [
+              {
+                "id": "d13fc2f5-3e05-4795-81eb-44143a09e552",
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      },
+      "tag": "out-core-27"
+    },
+    {
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "84.32.209.6",
+            "port": 443,
+            "users": [
+              {
+                "encryption": "none",
+                "flow": "xtls-rprx-vision",
+                "id": "37253a6a-2a9b-42bb-992c-b5f1b1ef1791"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "realitySettings": {
+          "fingerprint": "chrome",
+          "publicKey": "3WzSgL8uXA3vE3IHrfdBpJmOO4MYrsWpczDSY_jJRjI",
+          "serverName": "vltch.mostserv.xyz",
+          "shortId": "226509f017e4c36d",
+          "spiderX": ""
+        },
+        "security": "reality"
+      },
+      "tag": "out-core-28"
+    },
+    {
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "82.198.246.97",
+            "port": 180,
+            "users": [
+              {
+                "id": "d13fc2f5-3e05-4795-81eb-44143a09e552",
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      },
+      "tag": "out-core-29"
+    }
+  ],
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": [
+      {
+        "inboundTag": [
+          "in-core-5"
+        ],
+        "outboundTag": "out-core-5",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "in-core-6"
+        ],
+        "outboundTag": "out-core-6",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "in-core-7"
+        ],
+        "outboundTag": "out-core-7",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "in-core-9"
+        ],
+        "outboundTag": "out-core-9",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "in-core-10"
+        ],
+        "outboundTag": "out-core-10",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "in-core-12"
+        ],
+        "outboundTag": "out-core-12",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "in-core-13"
+        ],
+        "outboundTag": "out-core-13",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "in-core-14"
+        ],
+        "outboundTag": "out-core-14",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "in-core-15"
+        ],
+        "outboundTag": "out-core-15",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "in-core-16"
+        ],
+        "outboundTag": "out-core-16",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "in-core-17"
+        ],
+        "outboundTag": "out-core-17",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "in-core-18"
+        ],
+        "outboundTag": "out-core-18",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "in-core-19"
+        ],
+        "outboundTag": "out-core-19",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "in-core-20"
+        ],
+        "outboundTag": "out-core-20",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "in-core-21"
+        ],
+        "outboundTag": "out-core-21",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "in-core-22"
+        ],
+        "outboundTag": "out-core-22",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "in-core-23"
+        ],
+        "outboundTag": "out-core-23",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "in-core-24"
+        ],
+        "outboundTag": "out-core-24",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "in-core-26"
+        ],
+        "outboundTag": "out-core-26",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "in-core-27"
+        ],
+        "outboundTag": "out-core-27",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "in-core-28"
+        ],
+        "outboundTag": "out-core-28",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "in-core-29"
+        ],
+        "outboundTag": "out-core-29",
+        "type": "field"
+      }
+    ]
+  }
+}

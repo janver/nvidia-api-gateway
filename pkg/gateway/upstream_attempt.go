@@ -4,15 +4,18 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"nvidia-api-gateway/pkg/models"
 )
 
-var errUpstreamFirstByteTimeout = errors.New("upstream first byte timeout")
+var (
+	errUpstreamFirstByteTimeout = errors.New("upstream first byte timeout")
+	errUpstreamEmptyResponse    = errors.New("upstream returned empty response")
+)
 
 type upstreamDoResult struct {
 	resp *http.Response
@@ -22,6 +25,28 @@ type upstreamDoResult struct {
 type firstReadResult struct {
 	data []byte
 	err  error
+}
+
+func headerWaitTimeoutForRequest(cfg models.SystemConfig, method, endpointPath string, enabled bool) time.Duration {
+	if !enabled {
+		return 0
+	}
+	return firstByteTimeout(cfg)
+}
+
+func (g *Gateway) shouldUseHeaderWaitTimeout(ctx context.Context, method, endpointPath string) bool {
+	method = strings.ToUpper(strings.TrimSpace(method))
+	endpointPath = strings.Trim(strings.TrimSpace(endpointPath), "/")
+	if method == http.MethodPost && endpointPath == "chat/completions" {
+		if g == nil || g.scheduler == nil {
+			return false
+		}
+		stats, err := g.scheduler.Stats(ctx)
+		if err == nil && stats != nil && stats.Active <= 1 {
+			return false
+		}
+	}
+	return true
 }
 
 func (g *Gateway) openUpstreamHeadersWithTimeout(
@@ -51,7 +76,7 @@ func (g *Gateway) openUpstreamHeadersWithTimeout(
 		resultCh <- upstreamDoResult{resp: resp, err: doErr}
 	}()
 
-	timeout := firstByteTimeout(cfg)
+	timeout := headerWaitTimeoutForRequest(cfg, method, endpointPath, g.shouldUseHeaderWaitTimeout(ctx, method, endpointPath))
 	if timeout <= 0 {
 		result := <-resultCh
 		if result.err != nil {
@@ -86,9 +111,11 @@ func (g *Gateway) openUpstreamStreamWithPrefetch(
 	key string,
 	body []byte,
 ) (*http.Response, io.Reader, context.CancelFunc, error) {
-	timeout := firstByteTimeout(cfg)
+	// 流式请求用完整请求超时（默认 600s），而不是首包超时（90s）
+	// nvidia 大模型推理首个 token 可能需要较长时间
+	timeout := time.Duration(cfg.RequestTimeoutSecond) * time.Second
 	if timeout <= 0 {
-		timeout = time.Duration(models.DefaultFirstByteTimeoutMs) * time.Millisecond
+		timeout = 10 * time.Minute
 	}
 
 	reqCtx, cancel := context.WithCancel(ctx)
@@ -104,7 +131,7 @@ func (g *Gateway) openUpstreamStreamWithPrefetch(
 	startedAt := time.Now()
 	resultCh := make(chan upstreamDoResult, 1)
 	go func() {
-		resp, doErr := g.httpClient(cfg, key).Do(req)
+		resp, doErr := g.streamHTTPClient(cfg, key).Do(req)
 		resultCh <- upstreamDoResult{resp: resp, err: doErr}
 	}()
 
@@ -127,17 +154,60 @@ func (g *Gateway) openUpstreamStreamWithPrefetch(
 		return nil, nil, nil, ctx.Err()
 	}
 
-	remaining := timeout - time.Since(startedAt)
-	if remaining <= 0 {
-		_ = resp.Body.Close()
-		cancel()
-		return nil, nil, nil, errUpstreamFirstByteTimeout
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusBadRequest {
+		return resp, resp.Body, cancel, nil
 	}
 
+	var prefetched bytes.Buffer
+	for {
+		remaining := timeout - time.Since(startedAt)
+		if remaining <= 0 {
+			_ = resp.Body.Close()
+			cancel()
+			return nil, nil, nil, errUpstreamFirstByteTimeout
+		}
+
+		result, readErr := readResponseBodyOnce(ctx, resp.Body, remaining)
+		if readErr != nil {
+			_ = resp.Body.Close()
+			cancel()
+			return nil, nil, nil, readErr
+		}
+		if len(result.data) > 0 {
+			_, _ = prefetched.Write(result.data)
+		}
+
+		meaningful, done := inspectOpenAIStreamPrefetch(prefetched.Bytes())
+		if done && !meaningful {
+			_ = resp.Body.Close()
+			cancel()
+			return nil, nil, nil, errUpstreamEmptyResponse
+		}
+		if meaningful || prefetched.Len() >= maxOpenAIStreamPrefetchBytes {
+			return resp, io.MultiReader(bytes.NewReader(prefetched.Bytes()), resp.Body), cancel, nil
+		}
+
+		if result.err != nil {
+			if result.err == io.EOF {
+				_ = resp.Body.Close()
+				cancel()
+				return nil, nil, nil, errUpstreamEmptyResponse
+			}
+			_ = resp.Body.Close()
+			cancel()
+			return nil, nil, nil, result.err
+		}
+	}
+}
+
+func readResponseBodyOnce(ctx context.Context, body io.Reader, timeout time.Duration) (firstReadResult, error) {
+	if timeout <= 0 {
+		timeout = time.Duration(models.DefaultFirstByteTimeoutMs) * time.Millisecond
+	}
 	readCh := make(chan firstReadResult, 1)
 	go func() {
 		buf := make([]byte, 4096)
-		n, readErr := resp.Body.Read(buf)
+		n, readErr := body.Read(buf)
 		payload := []byte(nil)
 		if n > 0 {
 			payload = append(payload, buf[:n]...)
@@ -145,25 +215,14 @@ func (g *Gateway) openUpstreamStreamWithPrefetch(
 		readCh <- firstReadResult{data: payload, err: readErr}
 	}()
 
-	timer.Reset(remaining)
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
 	case result := <-readCh:
-		if len(result.data) == 0 {
-			_ = resp.Body.Close()
-			cancel()
-			if result.err != nil {
-				return nil, nil, nil, result.err
-			}
-			return nil, nil, nil, fmt.Errorf("upstream stream returned no data")
-		}
-		return resp, io.MultiReader(bytes.NewReader(result.data), resp.Body), cancel, nil
+		return result, nil
 	case <-timer.C:
-		_ = resp.Body.Close()
-		cancel()
-		return nil, nil, nil, errUpstreamFirstByteTimeout
+		return firstReadResult{}, errUpstreamFirstByteTimeout
 	case <-ctx.Done():
-		_ = resp.Body.Close()
-		cancel()
-		return nil, nil, nil, ctx.Err()
+		return firstReadResult{}, ctx.Err()
 	}
 }

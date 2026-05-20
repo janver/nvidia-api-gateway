@@ -1,7 +1,8 @@
-package gateway
+﻿package gateway
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -28,10 +29,13 @@ type upstreamRuntimeEvent struct {
 	OperationLabel  string    `json:"operationLabel,omitempty"`
 	Stage           string    `json:"stage"`
 	StageLabel      string    `json:"stageLabel,omitempty"`
+	SourceType      string    `json:"sourceType,omitempty"`
+	SourceLabel     string    `json:"sourceLabel,omitempty"`
 	UpstreamKeyName string    `json:"upstreamKeyName,omitempty"`
 	Success         bool      `json:"success"`
 	HTTPStatus      int       `json:"httpStatus,omitempty"`
 	Detail          string    `json:"detail,omitempty"`
+	RawDetail       string    `json:"rawDetail,omitempty"`
 }
 
 type upstreamRuntimeSnapshot struct {
@@ -55,8 +59,18 @@ func GetUpstreamRuntime(sched *scheduler.Scheduler) fiber.Handler {
 }
 
 func recordUpstreamRuntimeEvent(operation, stage, plaintextKey string, success bool, httpStatus int, detail string) {
+	recordUpstreamRuntimeEventWithRaw(operation, stage, plaintextKey, success, httpStatus, detail, "")
+}
+
+func recordUpstreamRuntimeEventWithRaw(operation, stage, plaintextKey string, success bool, httpStatus int, detail, rawDetail string) {
 	if strings.TrimSpace(operation) == "" {
 		operation = "unknown"
+	}
+	sourceType, sourceLabel := upstreamEventSource(stage)
+	trimmedDetail := strings.TrimSpace(detail)
+	trimmedRawDetail := strings.TrimSpace(rawDetail)
+	if trimmedRawDetail == "" && sourceType != "gateway_internal" {
+		trimmedRawDetail = trimmedDetail
 	}
 	event := upstreamRuntimeEvent{
 		At:              time.Now(),
@@ -64,10 +78,13 @@ func recordUpstreamRuntimeEvent(operation, stage, plaintextKey string, success b
 		OperationLabel:  upstreamOperationLabel(operation),
 		Stage:           strings.TrimSpace(stage),
 		StageLabel:      upstreamStageLabel(stage),
+		SourceType:      sourceType,
+		SourceLabel:     sourceLabel,
 		UpstreamKeyName: lookupUpstreamKeyNameByPlaintext(plaintextKey),
 		Success:         success,
 		HTTPStatus:      httpStatus,
-		Detail:          strings.TrimSpace(detail),
+		Detail:          trimmedDetail,
+		RawDetail:       trimmedRawDetail,
 	}
 	systemUpstreamRuntimeStore.record(event)
 }
@@ -134,6 +151,19 @@ func upstreamStageLabel(stage string) string {
 			return ""
 		}
 		return stage
+	}
+}
+
+func upstreamEventSource(stage string) (string, string) {
+	switch strings.TrimSpace(stage) {
+	case "rate_limited", "auth_rejected", "upstream_failed", "upstream_ok":
+		return "upstream_http", "官方 HTTP 返回"
+	case "upstream_error":
+		return "network_error", "上游网络错误"
+	case "first_byte_timeout", "first_chunk_timeout":
+		return "gateway_timeout", "网关等待上游超时"
+	default:
+		return "gateway_internal", "网关内部阶段"
 	}
 }
 
@@ -218,4 +248,28 @@ func buildUpstreamRuntimeSummary(ctx context.Context, sched *scheduler.Scheduler
 		}
 	}
 	return summary
+}
+
+func buildUpstreamHTTPRawDetail(respStatus int, contentType, retryAfter string, body []byte) string {
+	lines := []string{fmt.Sprintf("HTTP %d", respStatus)}
+	if strings.TrimSpace(retryAfter) != "" {
+		lines = append(lines, "Retry-After: "+strings.TrimSpace(retryAfter))
+	}
+	if strings.TrimSpace(contentType) != "" {
+		lines = append(lines, "Content-Type: "+strings.TrimSpace(contentType))
+	}
+	trimmedBody := strings.TrimSpace(string(body))
+	if trimmedBody != "" {
+		lines = append(lines, "Body:")
+		lines = append(lines, truncateUpstreamRuntimeRawDetail(trimmedBody, 3000))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func truncateUpstreamRuntimeRawDetail(value string, limit int) string {
+	value = strings.TrimSpace(value)
+	if limit <= 0 || len(value) <= limit {
+		return value
+	}
+	return value[:limit] + "\n...[truncated]"
 }

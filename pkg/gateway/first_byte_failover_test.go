@@ -12,17 +12,19 @@ import (
 	"time"
 )
 
-func TestFirstByteFailoverForNonStreamRequests(t *testing.T) {
+func TestNetworkRetryForNonStreamRequestsKeepsSameKey(t *testing.T) {
 	var slowHits int32
 	var fastHits int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Header.Get("Authorization") {
 		case "Bearer slow-key":
-			atomic.AddInt32(&slowHits, 1)
-			time.Sleep(150 * time.Millisecond)
+			hit := atomic.AddInt32(&slowHits, 1)
+			if hit == 1 {
+				time.Sleep(150 * time.Millisecond)
+			}
 			writeJSON(w, http.StatusOK, map[string]any{
 				"choices": []map[string]any{{
-					"message": map[string]any{"role": "assistant", "content": "slow"},
+					"message": map[string]any{"role": "assistant", "content": "slow-recovered"},
 				}},
 			})
 		case "Bearer fast-key":
@@ -43,32 +45,38 @@ func TestFirstByteFailoverForNonStreamRequests(t *testing.T) {
 		{Name: "fast", Plaintext: "fast-key", Weight: 1, Status: APIKeyStatusActive},
 	})
 	gw := NewGateway(sched, nil, nil)
-	result := gw.executeOpenAINonStream(context.Background(), []byte(`{"model":"meta/llama-3.1-8b-instruct","messages":[{"role":"user","content":"hello"}]}`), "meta/llama-3.1-8b-instruct", "hello", nil, 0, nil)
+	result := gw.executeOpenAINonStream(context.Background(), []byte(`{"model":"meta/llama-3.1-8b-instruct","messages":[{"role":"user","content":"hello"}]}`), "meta/llama-3.1-8b-instruct", "hello", nil, 0, nil, "conversation:test-1")
 	if result.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d with body %s", result.StatusCode, string(result.Body))
 	}
-	if !bytes.Contains(result.Body, []byte("fast")) {
-		t.Fatalf("expected fast-key response, got %s", string(result.Body))
+	if !bytes.Contains(result.Body, []byte("slow-recovered")) {
+		t.Fatalf("expected same-key recovered response, got %s", string(result.Body))
 	}
-	if atomic.LoadInt32(&slowHits) == 0 || atomic.LoadInt32(&fastHits) == 0 {
-		t.Fatalf("expected both keys to be attempted, slow=%d fast=%d", slowHits, fastHits)
+	if hits := atomic.LoadInt32(&slowHits); hits < 2 {
+		t.Fatalf("expected slow key to be retried, got %d hits", hits)
+	}
+	if atomic.LoadInt32(&fastHits) != 0 {
+		t.Fatalf("expected fast key to remain unused, fastHits=%d slowHits=%d", fastHits, slowHits)
 	}
 }
 
-func TestFirstByteFailoverForStreamRequests(t *testing.T) {
+func TestNetworkRetryForStreamRequestsKeepsSameKey(t *testing.T) {
 	var slowHits int32
 	var fastHits int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		switch r.Header.Get("Authorization") {
 		case "Bearer slow-key":
-			atomic.AddInt32(&slowHits, 1)
+			hit := atomic.AddInt32(&slowHits, 1)
 			w.WriteHeader(http.StatusOK)
 			if flusher, ok := w.(http.Flusher); ok {
 				flusher.Flush()
 			}
-			time.Sleep(150 * time.Millisecond)
-			_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"slow\"}}]}\n\n")
+			if hit == 1 {
+				time.Sleep(150 * time.Millisecond)
+			}
+			_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"slow-recovered\"}}]}\n\n")
+			_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 		case "Bearer fast-key":
 			atomic.AddInt32(&fastHits, 1)
 			w.WriteHeader(http.StatusOK)
@@ -86,19 +94,18 @@ func TestFirstByteFailoverForStreamRequests(t *testing.T) {
 	})
 	gw := NewGateway(sched, nil, nil)
 	writer := newCaptureWriter()
-	startedAt := time.Now()
-	gw.executeOpenAIStream(context.Background(), writer, []byte(`{"model":"meta/llama-3.1-8b-instruct","messages":[{"role":"user","content":"hello"}],"stream":true}`), "meta/llama-3.1-8b-instruct", "hello", nil, 0, nil)
+	gw.executeOpenAIStream(context.Background(), writer, []byte(`{"model":"meta/llama-3.1-8b-instruct","messages":[{"role":"user","content":"hello"}],"stream":true}`), "meta/llama-3.1-8b-instruct", "hello", nil, 0, nil, "conversation:test-2")
 	if writer.status != http.StatusOK {
 		t.Fatalf("expected 200, got %d", writer.status)
 	}
-	if !strings.Contains(writer.body.String(), "fast") || strings.Contains(writer.body.String(), "slow") {
-		t.Fatalf("expected only fast stream content, got %s", writer.body.String())
+	if !strings.Contains(writer.body.String(), "slow-recovered") {
+		t.Fatalf("expected recovered stream content from same key, got %s", writer.body.String())
 	}
-	if writer.firstWriteAt.Sub(startedAt) < 40*time.Millisecond {
-		t.Fatalf("expected no downstream bytes before timeout-based switch, first write after %s", writer.firstWriteAt.Sub(startedAt))
+	if hits := atomic.LoadInt32(&slowHits); hits < 2 {
+		t.Fatalf("expected slow key to be retried, got %d hits", hits)
 	}
-	if atomic.LoadInt32(&slowHits) == 0 || atomic.LoadInt32(&fastHits) == 0 {
-		t.Fatalf("expected both keys to be attempted, slow=%d fast=%d", slowHits, fastHits)
+	if atomic.LoadInt32(&fastHits) != 0 {
+		t.Fatalf("expected fast key to remain unused, fastHits=%d slowHits=%d", fastHits, slowHits)
 	}
 }
 
@@ -138,7 +145,7 @@ func TestStreamDoesNotRetryAfterFirstChunkWasSent(t *testing.T) {
 	})
 	gw := NewGateway(sched, nil, nil)
 	writer := newCaptureWriter()
-	gw.executeOpenAIStream(context.Background(), writer, []byte(`{"model":"meta/llama-3.1-8b-instruct","messages":[{"role":"user","content":"hello"}],"stream":true}`), "meta/llama-3.1-8b-instruct", "hello", nil, 0, nil)
+	gw.executeOpenAIStream(context.Background(), writer, []byte(`{"model":"meta/llama-3.1-8b-instruct","messages":[{"role":"user","content":"hello"}],"stream":true}`), "meta/llama-3.1-8b-instruct", "hello", nil, 0, nil, "conversation:test-3")
 	if !strings.Contains(writer.body.String(), "slow-first") {
 		t.Fatalf("expected first chunk from slow key, got %s", writer.body.String())
 	}

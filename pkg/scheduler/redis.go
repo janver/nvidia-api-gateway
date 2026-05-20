@@ -11,10 +11,17 @@ import (
 )
 
 var (
+	// LuaAcquireKey 执行经典 Nginx 风格的平滑加权轮询（SWRR）：
+	//   对每个可用 key：currentWeight[k] += weight[k]，并选出 currentWeight 最大的；
+	//   将所选 key 的 currentWeight 减去本轮 totalWeight。
+	// 注意：所有访问的 key（active/dead/current_weights/cooling）都通过 KEYS 显式声明，
+	// 这样在 Redis Cluster 模式下用 hash tag 可统一映射到同一 slot；
+	// 而 concurrency:<key> 是动态名，单机模式下能跑，集群部署需要进一步用 hash tag 化（后续工作）。
 	LuaAcquireKey = redis.NewScript(`
 local active_keys = KEYS[1]
 local dead_keys = KEYS[2]
 local current_weights = KEYS[3]
+local cooling_keys = KEYS[4]
 
 local max_concurrency = tonumber(ARGV[1])
 local lock_ttl = tonumber(ARGV[2])
@@ -29,7 +36,7 @@ for i = 1, #weighted, 2 do
 	local key = weighted[i]
 	local weight = tonumber(weighted[i + 1]) or 0
 	if redis.call("SISMEMBER", dead_keys, key) == 0 then
-		local cool_until = redis.call("HGET", "key_cooling", key)
+		local cool_until = redis.call("HGET", cooling_keys, key)
 		if (not cool_until) or tonumber(cool_until) < now then
 			local c_key = "concurrency:" .. key
 			local current = tonumber(redis.call("GET", c_key) or "0")
@@ -63,6 +70,36 @@ local current = tonumber(redis.call("GET", c_key) or "0")
 if current > 0 then
 	redis.call("DECR", c_key)
 end
+return 1
+		`)
+
+	LuaTryAcquireSpecificKey = redis.NewScript(`
+local active_keys = KEYS[1]
+local dead_keys = KEYS[2]
+local cooling_keys = KEYS[3]
+
+local key = ARGV[1]
+local max_concurrency = tonumber(ARGV[2])
+local lock_ttl = tonumber(ARGV[3])
+local now = tonumber(ARGV[4])
+
+if redis.call("ZSCORE", active_keys, key) == false then
+	return 0
+end
+if redis.call("SISMEMBER", dead_keys, key) == 1 then
+	return 0
+end
+local cool_until = redis.call("HGET", cooling_keys, key)
+if cool_until and tonumber(cool_until) >= now then
+	return 0
+end
+local c_key = "concurrency:" .. key
+local current = tonumber(redis.call("GET", c_key) or "0")
+if current >= max_concurrency then
+	return 0
+end
+redis.call("INCR", c_key)
+redis.call("EXPIRE", c_key, lock_ttl)
 return 1
 		`)
 )
@@ -163,7 +200,7 @@ func (s *Scheduler) AcquireKey(ctx context.Context, maxConcurrency int) (string,
 		return s.active[selectedIndex].key, nil
 	}
 	res, err := LuaAcquireKey.Run(ctx, s.client,
-		[]string{"nvidia:keys:active", "nvidia:keys:dead", "key_current_weight"},
+		[]string{"nvidia:keys:active", "nvidia:keys:dead", "key_current_weight", "key_cooling"},
 		maxConcurrency, 60, time.Now().Unix()).Result()
 	if err == redis.Nil {
 		return "", nil
@@ -176,6 +213,67 @@ func (s *Scheduler) AcquireKey(ctx context.Context, maxConcurrency int) (string,
 		return "", nil
 	}
 	return str, nil
+}
+
+func (s *Scheduler) TryAcquireSpecificKey(ctx context.Context, key string, maxConcurrency int) (bool, error) {
+	if s == nil {
+		return false, nil
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return false, nil
+	}
+	if maxConcurrency <= 0 {
+		maxConcurrency = 1
+	}
+	if s.client == nil {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		now := time.Now().Unix()
+		for coolingKey, until := range s.cooling {
+			if until < now {
+				delete(s.cooling, coolingKey)
+			}
+		}
+		active := false
+		for i := range s.active {
+			if s.active[i].key == key {
+				active = true
+				break
+			}
+		}
+		if !active {
+			return false, nil
+		}
+		if _, dead := s.dead[key]; dead {
+			return false, nil
+		}
+		if until, cooling := s.cooling[key]; cooling && until >= now {
+			return false, nil
+		}
+		if s.concurrency[key] >= maxConcurrency {
+			return false, nil
+		}
+		s.concurrency[key]++
+		return true, nil
+	}
+	res, err := LuaTryAcquireSpecificKey.Run(ctx, s.client,
+		[]string{"nvidia:keys:active", "nvidia:keys:dead", "key_cooling"},
+		key, maxConcurrency, 60, time.Now().Unix()).Result()
+	if err == redis.Nil {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	switch v := res.(type) {
+	case int64:
+		return v > 0, nil
+	case string:
+		return strings.TrimSpace(v) == "1", nil
+	default:
+		return false, nil
+	}
 }
 
 func (s *Scheduler) ReleaseKey(ctx context.Context, key string) error {
@@ -215,9 +313,25 @@ func (s *Scheduler) MarkDead(ctx context.Context, key string) error {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		s.dead[key] = struct{}{}
+		// 把已死 key 的累计加权重置为 0，避免它在 Restore 之后立刻"借旧账"抢调度。
+		for i := range s.active {
+			if s.active[i].key == key {
+				s.active[i].currentWeight = 0
+				break
+			}
+		}
+		// 同步清掉并发计数，否则一旦标记 Dead，对应槽位会被永远占用，
+		// 影响后续 RestoreRecoverableStatuses 把它重新拉回 Active 时的容量判定。
+		delete(s.concurrency, key)
 		return nil
 	}
-	return s.client.SAdd(ctx, "nvidia:keys:dead", key).Err()
+	if err := s.client.SAdd(ctx, "nvidia:keys:dead", key).Err(); err != nil {
+		return err
+	}
+	// 在 Redis 端也把这条 key 的累计加权移除，防止 key_current_weight 哈希长期膨胀。
+	// HDel 失败不致命：下次 Lua 调用读到旧值最多影响一次调度选择。
+	_ = s.client.HDel(ctx, "key_current_weight", key).Err()
+	return nil
 }
 
 func (s *Scheduler) Reset(ctx context.Context) error {
@@ -256,6 +370,9 @@ func (s *Scheduler) Reset(ctx context.Context) error {
 	return nil
 }
 
+// Stats 是只读的 getter，**不再**做过期 cooling 条目的清理；
+// 过期清理由 AcquireKey / TryAcquireSpecificKey 自然完成，或由调用方显式 CleanupExpired。
+// 这样 Stats 在 dashboard 高频刷新下不会反复 HDEL，副作用面更小。
 func (s *Scheduler) Stats(ctx context.Context) (*Stats, error) {
 	if s == nil {
 		return &Stats{}, nil
@@ -265,12 +382,10 @@ func (s *Scheduler) Stats(ctx context.Context) (*Stats, error) {
 		defer s.mu.Unlock()
 		now := time.Now().Unix()
 		cooling := 0
-		for key, until := range s.cooling {
+		for _, until := range s.cooling {
 			if until >= now {
 				cooling++
-				continue
 			}
-			delete(s.cooling, key)
 		}
 		return &Stats{Active: len(s.active), Cooling: cooling, Dead: len(s.dead)}, nil
 	}
@@ -297,18 +412,57 @@ func (s *Scheduler) Stats(ctx context.Context) (*Stats, error) {
 	}
 	now := time.Now().Unix()
 	cooling := 0
-	for key, until := range coolingEntries {
+	for _, until := range coolingEntries {
 		unixTs, convErr := strconv.ParseInt(until, 10, 64)
 		if convErr != nil {
 			continue
 		}
 		if unixTs >= now {
 			cooling++
-			continue
 		}
-		s.client.HDel(ctx, "key_cooling", key)
 	}
 	return &Stats{Active: int(active), Cooling: cooling, Dead: int(dead)}, nil
+}
+
+// CleanupExpired 显式清理过期的 cooling 条目；后台 ticker 可以周期调用，
+// 避免 Stats 这个只读接口承担删除职责。
+func (s *Scheduler) CleanupExpired(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	if s.client == nil {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		now := time.Now().Unix()
+		for key, until := range s.cooling {
+			if until < now {
+				delete(s.cooling, key)
+			}
+		}
+		return nil
+	}
+	coolingEntries, err := s.client.HGetAll(ctx, "key_cooling").Result()
+	if err != nil {
+		if isRedisUnavailable(err) {
+			return nil
+		}
+		return err
+	}
+	now := time.Now().Unix()
+	expired := make([]string, 0, len(coolingEntries))
+	for key, until := range coolingEntries {
+		unixTs, convErr := strconv.ParseInt(until, 10, 64)
+		if convErr != nil {
+			continue
+		}
+		if unixTs < now {
+			expired = append(expired, key)
+		}
+	}
+	if len(expired) == 0 {
+		return nil
+	}
+	return s.client.HDel(ctx, "key_cooling", expired...).Err()
 }
 
 func isRedisUnavailable(err error) bool {

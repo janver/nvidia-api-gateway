@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
 )
@@ -33,7 +34,7 @@ func TestRelayOpenAIStreamToResponsesTranslator(t *testing.T) {
 		"model":       "gpt-4o",
 		"status":      "in_progress",
 	})
-	if err := relayOpenAIStream(strings.NewReader(stream), translator); err != nil {
+	if err := relayOpenAIStream(context.Background(), strings.NewReader(stream), translator, streamRelayOptions{Writer: &buf}); err != nil {
 		t.Fatalf("relayOpenAIStream failed: %v", err)
 	}
 	output := buf.String()

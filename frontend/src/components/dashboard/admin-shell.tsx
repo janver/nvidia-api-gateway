@@ -9,6 +9,7 @@ const navItems = [
   ["\u603b\u89c8", "/admin"],
   ["API \u5bc6\u94a5", "/admin/keys"],
   ["\u4ee3\u7406\u6c60", "/admin/proxies"],
+  ["Xray \u8282\u70b9", "/admin/core"],
   ["\u81ea\u5b9a\u4e49 API Key", "/admin/master-keys"],
   ["\u7cfb\u7edf\u8bbe\u7f6e", "/admin/system"],
   ["\u5065\u5eb7\u68c0\u67e5", "/admin/health"],

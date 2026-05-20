@@ -13,6 +13,11 @@ type upstreamAttemptDiagnostics struct {
 	LastSelectedName string
 	Switched         bool
 	LastRetryCause   string
+	// Status 在 ChatCompletions 这一类高层入口结束前由 finalize 显式置位，
+	// 用于让客户端/监控分辨"成功 / 重试耗尽 / 上游全部失败 / 客户端断连"几种结局。
+	// 空字符串表示尚未结束。
+	Status     string
+	FinalError string
 }
 
 func newUpstreamAttemptDiagnostics(operation string) *upstreamAttemptDiagnostics {
@@ -42,6 +47,16 @@ func (d *upstreamAttemptDiagnostics) noteRetry(cause string) {
 	d.LastRetryCause = strings.TrimSpace(cause)
 }
 
+// finalize 标记此次请求的最终状态。status 取 "success" / "exhausted" / "context_canceled" / "upstream_failed"。
+// finalErr 是给运维看的简短原因，可为空。
+func (d *upstreamAttemptDiagnostics) finalize(status, finalErr string) {
+	if d == nil {
+		return
+	}
+	d.Status = strings.TrimSpace(status)
+	d.FinalError = strings.TrimSpace(finalErr)
+}
+
 func encodeDebugHeaderValue(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -61,15 +76,18 @@ func (d *upstreamAttemptDiagnostics) headers() map[string]string {
 		chain = strings.Join(d.SelectedNames, " -> ")
 	}
 	return map[string]string{
-		"X-Gateway-Upstream-Operation":      d.Operation,
-		"X-Gateway-Upstream-Key-Name":       selected,
-		"X-Gateway-Upstream-Key-Name-B64":   encodeDebugHeaderValue(selected),
-		"X-Gateway-Upstream-Key-Chain":      chain,
-		"X-Gateway-Upstream-Key-Chain-B64":  encodeDebugHeaderValue(chain),
-		"X-Gateway-Upstream-Attempts":       strconv.Itoa(d.AttemptCount),
-		"X-Gateway-Upstream-Switched":       strconv.FormatBool(d.Switched),
-		"X-Gateway-Upstream-Last-Error":     d.LastRetryCause,
-		"X-Gateway-Upstream-Last-Error-B64": encodeDebugHeaderValue(d.LastRetryCause),
+		"X-Gateway-Upstream-Operation":       d.Operation,
+		"X-Gateway-Upstream-Key-Name":        selected,
+		"X-Gateway-Upstream-Key-Name-B64":    encodeDebugHeaderValue(selected),
+		"X-Gateway-Upstream-Key-Chain":       chain,
+		"X-Gateway-Upstream-Key-Chain-B64":   encodeDebugHeaderValue(chain),
+		"X-Gateway-Upstream-Attempts":        strconv.Itoa(d.AttemptCount),
+		"X-Gateway-Upstream-Switched":        strconv.FormatBool(d.Switched),
+		"X-Gateway-Upstream-Last-Error":      d.LastRetryCause,
+		"X-Gateway-Upstream-Last-Error-B64":  encodeDebugHeaderValue(d.LastRetryCause),
+		"X-Gateway-Upstream-Status":          d.Status,
+		"X-Gateway-Upstream-Final-Error":     d.FinalError,
+		"X-Gateway-Upstream-Final-Error-B64": encodeDebugHeaderValue(d.FinalError),
 	}
 }
 

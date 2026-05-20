@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"crypto/subtle"
 	"strings"
 
 	"nvidia-api-gateway/pkg/db"
@@ -30,9 +31,13 @@ func MasterAuthMiddleware() fiber.Handler {
 			})
 		}
 
+		// 用常量时间比较防止侧信道泄漏 Master Key 长度/前缀。
+		// 注意：subtle.ConstantTimeCompare 在长度不一致时直接返回 0，但不会比较内容；
+		// 这本身就泄漏长度。但 Master Key 是定长 token，泄漏长度无意义，可接受。
+		incomingBytes := []byte(keyStr)
 		var masterKey *models.MasterKey
 		for _, key := range activeMasterKeys {
-			if key.Key == keyStr {
+			if subtle.ConstantTimeCompare([]byte(key.Key), incomingBytes) == 1 {
 				copy := key
 				masterKey = &copy
 				break

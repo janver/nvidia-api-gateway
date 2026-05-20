@@ -3,7 +3,11 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,18 +26,22 @@ type upstreamKeyRuntimeInfo struct {
 }
 
 type upstreamProxyRuntimeInfo struct {
-	ID       uint
-	Name     string
-	Type     string
-	URL      string
-	HostPort string
-	Username string
+	ID        uint
+	Name      string
+	Type      string
+	URL       string
+	HostPort  string
+	Username  string
+	ManagedBy string
 }
 
 var (
-	upstreamRuntimeMu      sync.RWMutex
-	upstreamRuntimeByKey   = map[string]upstreamKeyRuntimeInfo{}
-	upstreamRuntimeByProxy = map[uint]upstreamProxyRuntimeInfo{}
+	upstreamRuntimeMu             sync.RWMutex
+	upstreamRuntimeByKey          = map[string]upstreamKeyRuntimeInfo{}
+	upstreamRuntimeByProxy        = map[uint]upstreamProxyRuntimeInfo{}
+	upstreamRuntimeFailoverByID   = map[uint]upstreamProxyRuntimeInfo{}
+	upstreamRuntimeFailoverByURL  = map[string]upstreamProxyRuntimeInfo{}
+	upstreamRuntimeCoolingByProxy = map[uint]time.Time{}
 )
 
 func normalizeProxyType(value string) string {
@@ -42,7 +50,7 @@ func normalizeProxyType(value string) string {
 
 func validateProxyType(value string) error {
 	switch normalizeProxyType(value) {
-	case "http", "https", "socks5", "socks5h":
+	case "http", "https", "socks5", "socks5h", "dokodemo":
 		return nil
 	default:
 		return fmt.Errorf("unsupported proxy type: %s", strings.TrimSpace(value))
@@ -106,15 +114,18 @@ func buildProxyURLFromModel(proxy models.UpstreamProxy) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	userInfo := ""
+	proxyURL := &url.URL{
+		Scheme: proxy.Type,
+		Host:   net.JoinHostPort(proxy.Host, strconv.Itoa(proxy.Port)),
+	}
 	if proxy.Username != "" || password != "" {
 		if password != "" {
-			userInfo = fmt.Sprintf("%s:%s@", proxy.Username, password)
+			proxyURL.User = url.UserPassword(proxy.Username, password)
 		} else {
-			userInfo = fmt.Sprintf("%s@", proxy.Username)
+			proxyURL.User = url.User(proxy.Username)
 		}
 	}
-	return fmt.Sprintf("%s://%s%s:%d", proxy.Type, userInfo, proxy.Host, proxy.Port), nil
+	return proxyURL.String(), nil
 }
 
 func buildProxyPreviewFromModel(proxy models.UpstreamProxy) string {
@@ -138,12 +149,13 @@ func buildProxyRuntimeIndex(proxies []models.UpstreamProxy) map[uint]upstreamPro
 			continue
 		}
 		items[proxy.ID] = upstreamProxyRuntimeInfo{
-			ID:       proxy.ID,
-			Name:     proxy.Name,
-			Type:     proxy.Type,
-			URL:      url,
-			HostPort: fmt.Sprintf("%s:%d", proxy.Host, proxy.Port),
-			Username: proxy.Username,
+			ID:        proxy.ID,
+			Name:      proxy.Name,
+			Type:      proxy.Type,
+			URL:       url,
+			HostPort:  fmt.Sprintf("%s:%d", proxy.Host, proxy.Port),
+			Username:  proxy.Username,
+			ManagedBy: proxy.ManagedBy,
 		}
 	}
 	return items
@@ -183,16 +195,220 @@ func rebuildUpstreamRuntime(store *db.Store) error {
 	return nil
 }
 
+func proxyRuntimeURLKey(raw string) string {
+	return strings.TrimSpace(raw)
+}
+
+func selectAlternateManagedProxyURLForAPIKey(cfg models.SystemConfig, plaintextKey string, failedProxyURL string) (string, bool) {
+	failedProxyURL = strings.TrimSpace(failedProxyURL)
+	if failedProxyURL == "" {
+		return "", false
+	}
+	currentInfo, ok := effectiveProxyRuntimeInfoForAPIKey(cfg, plaintextKey)
+	if !ok || strings.TrimSpace(currentInfo.ManagedBy) != models.CoreManagedByXray {
+		return "", false
+	}
+	store, err := db.ReadStore()
+	if err != nil || store == nil {
+		return "", false
+	}
+	proxyIndex := buildProxyRuntimeIndex(store.Proxies)
+	type candidate struct {
+		info      upstreamProxyRuntimeInfo
+		success   bool
+		latencyMs int64
+		id        uint
+	}
+	candidates := make([]candidate, 0)
+	now := time.Now()
+	for _, proxy := range store.Proxies {
+		proxy = models.NormalizeUpstreamProxy(proxy)
+		if proxy.ID == 0 || proxy.ID == currentInfo.ID || proxy.ManagedBy != models.CoreManagedByXray || !isProxyEnabled(proxy) {
+			continue
+		}
+		if isProxyRuntimeCooling(proxy.ID, now) {
+			continue
+		}
+		info, ok := proxyIndex[proxy.ID]
+		if !ok || strings.TrimSpace(info.URL) == "" || strings.TrimSpace(info.URL) == failedProxyURL {
+			continue
+		}
+		cand := candidate{info: info, id: proxy.ID, success: true, latencyMs: 1<<62 - 1}
+		if proxy.LastTest != nil {
+			cand.success = proxy.LastTest.Success
+			if proxy.LastTest.ResponseTime > 0 {
+				cand.latencyMs = proxy.LastTest.ResponseTime
+			}
+		}
+		candidates = append(candidates, cand)
+	}
+	if len(candidates) == 0 {
+		return "", false
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].success != candidates[j].success {
+			return candidates[i].success && !candidates[j].success
+		}
+		if candidates[i].latencyMs != candidates[j].latencyMs {
+			return candidates[i].latencyMs < candidates[j].latencyMs
+		}
+		return candidates[i].id < candidates[j].id
+	})
+	return candidates[0].info.URL, true
+}
+
+func currentSystemProxyURL(cfg models.SystemConfig) string {
+	if info, ok := resolveSystemProxyRuntimeInfo(cfg); ok && strings.TrimSpace(info.URL) != "" {
+		return strings.TrimSpace(info.URL)
+	}
+	return strings.TrimSpace(cfg.UpstreamProxyURL)
+}
+
+func markProxyRuntimeCooling(proxyID uint, duration time.Duration) {
+	if proxyID == 0 {
+		return
+	}
+	if duration <= 0 {
+		duration = 10 * time.Minute
+	}
+	upstreamRuntimeMu.Lock()
+	upstreamRuntimeCoolingByProxy[proxyID] = time.Now().Add(duration)
+	upstreamRuntimeMu.Unlock()
+}
+
+func isProxyRuntimeCooling(proxyID uint, now time.Time) bool {
+	if proxyID == 0 {
+		return false
+	}
+	upstreamRuntimeMu.Lock()
+	defer upstreamRuntimeMu.Unlock()
+	until, ok := upstreamRuntimeCoolingByProxy[proxyID]
+	if !ok {
+		return false
+	}
+	if !until.After(now) {
+		delete(upstreamRuntimeCoolingByProxy, proxyID)
+		return false
+	}
+	return true
+}
+
+func setProxyRuntimeFailover(origin, replacement upstreamProxyRuntimeInfo) {
+	originURL := proxyRuntimeURLKey(origin.URL)
+	if origin.ID == 0 && originURL == "" {
+		return
+	}
+	if resolved, ok := lookupProxyRuntimeInfo(replacement.ID); ok && strings.TrimSpace(resolved.URL) != "" {
+		replacement = resolved
+	}
+	upstreamRuntimeMu.Lock()
+	defer upstreamRuntimeMu.Unlock()
+	if origin.ID > 0 {
+		upstreamRuntimeFailoverByID[origin.ID] = replacement
+		upstreamRuntimeCoolingByProxy[origin.ID] = time.Now().Add(10 * time.Minute)
+	}
+	if originURL != "" {
+		upstreamRuntimeFailoverByURL[originURL] = replacement
+	}
+	for id, info := range upstreamRuntimeFailoverByID {
+		if info.ID == origin.ID || (originURL != "" && proxyRuntimeURLKey(info.URL) == originURL) {
+			upstreamRuntimeFailoverByID[id] = replacement
+		}
+	}
+	for rawURL, info := range upstreamRuntimeFailoverByURL {
+		if info.ID == origin.ID || (originURL != "" && proxyRuntimeURLKey(info.URL) == originURL) {
+			upstreamRuntimeFailoverByURL[rawURL] = replacement
+		}
+	}
+}
+
+type managedProxyCandidate struct {
+	info        upstreamProxyRuntimeInfo
+	successRank int
+	latencyMs   int64
+	id          uint
+}
+
+func selectAlternativeManagedProxyFromStore(store *db.Store, origin upstreamProxyRuntimeInfo) (upstreamProxyRuntimeInfo, bool) {
+	if store == nil {
+		return upstreamProxyRuntimeInfo{}, false
+	}
+	origin = upstreamProxyRuntimeInfo{ID: origin.ID, URL: strings.TrimSpace(origin.URL), ManagedBy: strings.TrimSpace(origin.ManagedBy)}
+	if origin.ManagedBy != models.CoreManagedByXray {
+		return upstreamProxyRuntimeInfo{}, false
+	}
+	proxyIndex := buildProxyRuntimeIndex(store.Proxies)
+	now := time.Now()
+	candidates := make([]managedProxyCandidate, 0)
+	for _, proxy := range store.Proxies {
+		proxy = models.NormalizeUpstreamProxy(proxy)
+		if proxy.ID == 0 || proxy.ID == origin.ID {
+			continue
+		}
+		if proxy.ManagedBy != models.CoreManagedByXray || !isProxyEnabled(proxy) {
+			continue
+		}
+		if isProxyRuntimeCooling(proxy.ID, now) {
+			continue
+		}
+		info, ok := proxyIndex[proxy.ID]
+		if !ok || strings.TrimSpace(info.URL) == "" {
+			continue
+		}
+		successRank := 1
+		latencyMs := int64(1 << 62)
+		if proxy.LastTest != nil {
+			if proxy.LastTest.Success {
+				successRank = 3
+			} else {
+				successRank = 0
+			}
+			if proxy.LastTest.ResponseTime > 0 {
+				latencyMs = proxy.LastTest.ResponseTime
+			}
+		}
+		candidates = append(candidates, managedProxyCandidate{info: info, successRank: successRank, latencyMs: latencyMs, id: proxy.ID})
+	}
+	if len(candidates) == 0 {
+		return upstreamProxyRuntimeInfo{}, false
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].successRank != candidates[j].successRank {
+			return candidates[i].successRank > candidates[j].successRank
+		}
+		if candidates[i].latencyMs != candidates[j].latencyMs {
+			return candidates[i].latencyMs < candidates[j].latencyMs
+		}
+		return candidates[i].id < candidates[j].id
+	})
+	return candidates[0].info, true
+}
+
+func promoteAlternativeManagedProxy(origin upstreamProxyRuntimeInfo) (upstreamProxyRuntimeInfo, bool) {
+	store, err := db.ReadStore()
+	if err != nil {
+		return upstreamProxyRuntimeInfo{}, false
+	}
+	replacement, ok := selectAlternativeManagedProxyFromStore(store, origin)
+	if !ok {
+		return upstreamProxyRuntimeInfo{}, false
+	}
+	setProxyRuntimeFailover(origin, replacement)
+	return replacement, true
+}
+
 func resolveProxyOverrideForPlaintextKey(plaintextKey string) (string, bool) {
 	plaintextKey = strings.TrimSpace(plaintextKey)
 	if plaintextKey == "" {
 		return "", false
 	}
-	upstreamRuntimeMu.RLock()
-	info, ok := upstreamRuntimeByKey[plaintextKey]
-	upstreamRuntimeMu.RUnlock()
-	if ok && info.ProxyURL != "" {
-		return info.ProxyURL, true
+	if info, ok := lookupKeyRuntimeInfo(plaintextKey); ok {
+		if proxyInfo, found := lookupProxyRuntimeInfo(info.ProxyID); found && strings.TrimSpace(proxyInfo.URL) != "" {
+			return strings.TrimSpace(proxyInfo.URL), true
+		}
+		if strings.TrimSpace(info.ProxyURL) != "" {
+			return strings.TrimSpace(info.ProxyURL), true
+		}
 	}
 	return resolveProxyOverrideForPlaintextKeyFromStore(plaintextKey)
 }
@@ -235,6 +451,71 @@ func lookupKeyRuntimeInfo(plaintextKey string) (upstreamKeyRuntimeInfo, bool) {
 	return upstreamKeyRuntimeInfo{}, false
 }
 
+func lookupProxyRuntimeInfo(proxyID uint) (upstreamProxyRuntimeInfo, bool) {
+	if proxyID == 0 {
+		return upstreamProxyRuntimeInfo{}, false
+	}
+	upstreamRuntimeMu.RLock()
+	if override, ok := upstreamRuntimeFailoverByID[proxyID]; ok && strings.TrimSpace(override.URL) != "" {
+		upstreamRuntimeMu.RUnlock()
+		return override, true
+	}
+	info, ok := upstreamRuntimeByProxy[proxyID]
+	upstreamRuntimeMu.RUnlock()
+	if ok {
+		return info, true
+	}
+	return upstreamProxyRuntimeInfo{}, false
+}
+
+func resolveSystemProxyRuntimeInfo(cfg models.SystemConfig) (upstreamProxyRuntimeInfo, bool) {
+	cfg = models.NormalizeSystemConfig(cfg)
+	if cfg.UpstreamProxyID > 0 {
+		if info, ok := lookupProxyRuntimeInfo(cfg.UpstreamProxyID); ok {
+			return info, true
+		}
+	}
+	proxyURL := proxyRuntimeURLKey(cfg.UpstreamProxyURL)
+	if proxyURL == "" {
+		return upstreamProxyRuntimeInfo{}, false
+	}
+	upstreamRuntimeMu.RLock()
+	if override, ok := upstreamRuntimeFailoverByURL[proxyURL]; ok && strings.TrimSpace(override.URL) != "" {
+		upstreamRuntimeMu.RUnlock()
+		return override, true
+	}
+	for _, info := range upstreamRuntimeByProxy {
+		if proxyRuntimeURLKey(info.URL) == proxyURL {
+			upstreamRuntimeMu.RUnlock()
+			if resolved, ok := lookupProxyRuntimeInfo(info.ID); ok {
+				return resolved, true
+			}
+			return info, true
+		}
+	}
+	upstreamRuntimeMu.RUnlock()
+	return upstreamProxyRuntimeInfo{URL: proxyURL}, true
+}
+
+func effectiveProxyRuntimeInfoForAPIKey(cfg models.SystemConfig, plaintextKey string) (upstreamProxyRuntimeInfo, bool) {
+	if info, ok := lookupKeyRuntimeInfo(plaintextKey); ok {
+		if proxyInfo, found := lookupProxyRuntimeInfo(info.ProxyID); found {
+			return proxyInfo, true
+		}
+		if strings.TrimSpace(info.ProxyURL) != "" {
+			return upstreamProxyRuntimeInfo{ID: info.ProxyID, Name: info.ProxyName, URL: info.ProxyURL}, true
+		}
+	}
+	return resolveSystemProxyRuntimeInfo(cfg)
+}
+
+func effectiveProxyURLForAPIKey(cfg models.SystemConfig, plaintextKey string) string {
+	if info, ok := effectiveProxyRuntimeInfoForAPIKey(cfg, plaintextKey); ok && strings.TrimSpace(info.URL) != "" {
+		return strings.TrimSpace(info.URL)
+	}
+	return strings.TrimSpace(cfg.UpstreamProxyURL)
+}
+
 func buildProxyReferenceIndex(proxies []models.UpstreamProxy) map[uint]models.UpstreamProxy {
 	items := make(map[uint]models.UpstreamProxy, len(proxies))
 	for _, proxy := range proxies {
@@ -270,27 +551,47 @@ func validateAPIKeyProxyReference(store *db.Store, proxyID uint) error {
 	return fmt.Errorf("所选代理不存在")
 }
 
-func newHTTPClientWithProxyOverride(cfg models.SystemConfig, overrideProxyURL *string) *http.Client {
+func newHTTPClientWithProxyOverrideAndTimeout(cfg models.SystemConfig, overrideProxyURL *string, disableTotalTimeout bool) *http.Client {
 	timeout := time.Duration(cfg.RequestTimeoutSecond) * time.Second
 	if timeout <= 0 {
 		timeout = 10 * time.Minute
 	}
-	transport := cloneDefaultTransport()
-	effectiveProxyURL := cfg.UpstreamProxyURL
+	if disableTotalTimeout {
+		timeout = 0
+	}
+	effectiveProxyURL := currentSystemProxyURL(cfg)
 	if overrideProxyURL != nil {
 		effectiveProxyURL = strings.TrimSpace(*overrideProxyURL)
 	}
-	if proxyTransport, _, err := buildUpstreamProxyTransport(effectiveProxyURL); err == nil && proxyTransport != nil {
-		transport = proxyTransport
+	transport, err := cachedTransportForProxySetting(cfg, effectiveProxyURL, disableTotalTimeout)
+	if err != nil || transport == nil {
+		transport = cloneDefaultTransport()
 	}
 	return &http.Client{Timeout: timeout, Transport: transport}
 }
 
+func newHTTPClientWithProxyOverride(cfg models.SystemConfig, overrideProxyURL *string) *http.Client {
+	return newHTTPClientWithProxyOverrideAndTimeout(cfg, overrideProxyURL, false)
+}
+
+func newStreamHTTPClientWithProxyOverride(cfg models.SystemConfig, overrideProxyURL *string) *http.Client {
+	return newHTTPClientWithProxyOverrideAndTimeout(cfg, overrideProxyURL, true)
+}
+
 func newHTTPClientForAPIKey(cfg models.SystemConfig, plaintextKey string) *http.Client {
-	if proxyURL, ok := resolveProxyOverrideForPlaintextKey(plaintextKey); ok && strings.TrimSpace(proxyURL) != "" {
+	if info, ok := effectiveProxyRuntimeInfoForAPIKey(cfg, plaintextKey); ok && strings.TrimSpace(info.URL) != "" {
+		proxyURL := strings.TrimSpace(info.URL)
 		return newHTTPClientWithProxyOverride(cfg, &proxyURL)
 	}
 	return newHTTPClient(cfg)
+}
+
+func newStreamHTTPClientForAPIKey(cfg models.SystemConfig, plaintextKey string) *http.Client {
+	if info, ok := effectiveProxyRuntimeInfoForAPIKey(cfg, plaintextKey); ok && strings.TrimSpace(info.URL) != "" {
+		proxyURL := strings.TrimSpace(info.URL)
+		return newStreamHTTPClientWithProxyOverride(cfg, &proxyURL)
+	}
+	return newStreamHTTPClientWithProxyOverride(cfg, nil)
 }
 
 func testUpstreamProxyConnectivity(ctx context.Context, proxyCfg models.UpstreamProxy) map[string]any {
