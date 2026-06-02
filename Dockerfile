@@ -7,21 +7,21 @@ RUN npm ci
 COPY frontend/ ./
 RUN npm run build
 
-FROM golang:1.23-bookworm AS backend-builder
+FROM --platform=$BUILDPLATFORM golang:1.23-bookworm AS backend-builder
 ARG TARGETOS=linux
-ARG TARGETARCH=amd64
+ARG TARGETARCH
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . ./
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -o /out/nvidia-api-gateway ./main.go
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /out/nvidia-api-gateway ./main.go
 
 # xray-fetcher: 仅支持 Linux 容器（Docker 标准行为）
 # Windows 宿主机运行 Docker 时使用 Linux 容器，xray 下载 Linux 版本是正确的。
 # 若需要在 Windows 宿主机上直接运行（非 Docker），xray 会在启动时自动下载对应平台版本。
-FROM debian:bookworm-slim AS xray-fetcher
+FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS xray-fetcher
 ARG TARGETOS=linux
-ARG TARGETARCH=amd64
+ARG TARGETARCH
 ARG XRAY_VERSION=v26.3.27
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl unzip && apt-get clean
 RUN set -e; \
@@ -29,7 +29,7 @@ RUN set -e; \
         echo "Docker image supports Linux containers only; set --platform linux/<arch> on Windows hosts" >&2; \
         exit 1; \
     fi; \
-    case "${TARGETARCH:-amd64}" in \
+    case "${TARGETARCH}" in \
         amd64)  asset="Xray-linux-64.zip" ;; \
         arm64)  asset="Xray-linux-arm64-v8a.zip" ;; \
         arm)    asset="Xray-linux-arm32-v7a.zip" ;; \
