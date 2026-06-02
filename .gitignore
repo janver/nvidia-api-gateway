@@ -1,0 +1,3 @@
+# Local CodeGraph index and editor helper files
+.codegraph/
+.cursor/
